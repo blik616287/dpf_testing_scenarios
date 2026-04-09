@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dpf-discovery
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpf-discovery
+  namespace: dpf-discovery
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dpf-discovery
+  namespace: dpf-discovery
+  labels:
+    app: dpf-discovery
+spec:
+  selector:
+    matchLabels:
+      app: dpf-discovery
+  template:
+    metadata:
+      labels:
+        app: dpf-discovery
+    spec:
+      serviceAccountName: dpf-discovery
+      hostPID: true
+      hostNetwork: true
+      hostIPC: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: discovery
+          image: ubuntu:24.04
+          command: ["sleep", "infinity"]
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+            - name: host-dev
+              mountPath: /dev
+            - name: results
+              mountPath: /results
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+        - name: host-dev
+          hostPath:
+            path: /dev
+        - name: results
+          emptyDir: {}
