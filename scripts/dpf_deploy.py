@@ -43,6 +43,28 @@ ADDON_CP_CONFIGS_UID = "69b7039ae8451ebc583d6a13" # Spectro-DPU-DPF-CP-Configs
 ADDON_PASSTHROUGH_UID = "69834c1973ed315efeaed916" # DPF Zero Trust Use Case - Passthrough
 ADDON_HBN_UID = "698dd2dd4b0c719b6c763605"        # DPF Zero Trust Use Case - DOCA HBN
 
+# Variable values per profile (Phase 0 discovered)
+PROFILE_VARS = {
+    INFRA_PROFILE_UID: {
+        "K8sPodCIDR": "100.64.0.0/18",
+        "K8sServiceCIDR": "100.64.64.0/18",
+        "NfsServer": "172.16.30.90",
+        "NfsPath": "/dpf",
+        "NfsShareSize": "10Gi",
+        "controlPlaneInterface": "enp129s0f0",
+        "controlPlaneVIP": "172.16.30.244",
+        "dpuOobPassword": "Welcome2spectr0!",
+        "dpfDiscoveryStartIP": "172.16.30.33",
+        "dpfDiscoveryEndIP": "172.16.30.36",
+    },
+    ADDON_CP_CONFIGS_UID: {
+        "dpuClusterInterface": "enp129s0f0",
+        "dpuClusterIP": "172.16.30.244",
+        "DPU": "enp14s0",
+        "DPUNumVFs": "46",
+    },
+}
+
 CLUSTER_CONFIGS = {
     "dpf-ovn-baseline": {
         "description": "OVN baseline - Passthrough mode (no DPF acceleration)",
@@ -84,115 +106,66 @@ def get_profile_detail(uid):
     return api_request("GET", f"/clusterprofiles/{uid}")
 
 
-def build_profile_template(profile_data):
-    """Convert a profile detail response into a clusterProfileTemplate entry."""
-    pub = profile_data["spec"]["published"]
-    template = {
-        "uid": profile_data["metadata"]["uid"],
-        "name": pub["name"],
-        "cloudType": pub.get("cloudType", "all"),
-        "packs": [],
-        "type": pub.get("type", "cluster"),
-    }
-    if pub.get("packServerRefs"):
-        template["packServerRefs"] = pub["packServerRefs"]
-
-    for pack in pub.get("packs", []):
-        p = {
-            "name": pack["name"],
-            "layer": pack["layer"],
-            "packUid": pack["packUid"],
-            "type": pack.get("type", "manifest"),
-            "values": pack.get("values", ""),
-            "version": pack.get("version", ""),
-        }
-        if pack.get("tag"):
-            p["tag"] = pack["tag"]
-        if pack.get("registryUid"):
-            p["registryUid"] = pack["registryUid"]
-        if pack.get("server"):
-            p["server"] = pack["server"]
-        if pack.get("manifests"):
-            p["manifests"] = pack["manifests"]
-        if pack.get("annotations"):
-            p["annotations"] = pack["annotations"]
-        if pack.get("digest"):
-            p["digest"] = pack["digest"]
-        if pack.get("presets"):
-            p["presets"] = pack["presets"]
-        if pack.get("schema"):
-            p["schema"] = pack["schema"]
-        template["packs"].append(p)
-
-    return template
+def build_profile_template(uid):
+    """Build a minimal cluster profile reference: uid + variables only."""
+    entry = {"uid": uid}
+    if uid in PROFILE_VARS:
+        entry["variables"] = [
+            {"name": k, "value": v} for k, v in PROFILE_VARS[uid].items()
+        ]
+    return entry
 
 
 def build_cluster_payload(name, edge_host_uids):
     """Build the full cluster creation payload."""
     config = CLUSTER_CONFIGS[name]
 
-    # Fetch all profile details
-    print(f"Fetching infra profile...")
-    infra = get_profile_detail(INFRA_PROFILE_UID)
-    infra_template = build_profile_template(infra)
-
-    profiles = [infra_template]
+    profiles = [build_profile_template(INFRA_PROFILE_UID)]
     for addon_uid in config["addon_profiles"]:
-        print(f"Fetching addon profile {addon_uid}...")
-        addon = get_profile_detail(addon_uid)
-        profiles.append(build_profile_template(addon))
+        profiles.append(build_profile_template(addon_uid))
 
-    # Machine pools: node 1 = CP+worker, node 2 = worker
     machine_pools = [
         {
-            "name": "cp-pool",
-            "size": 1,
-            "isControlPlane": True,
-            "useControlPlaneAsWorker": True,
-            "labels": ["master"],
-            "taints": [],
-            "machinePoolProperties": {"archType": "amd64"},
-            "hosts": [{"hostUid": edge_host_uids[0]}] if edge_host_uids else [],
-            "updateStrategy": {},
+            "cloudConfig": {
+                "edgeHosts": [{"hostUid": edge_host_uids[0]}] if edge_host_uids else [],
+            },
+            "poolConfig": {
+                "name": "cp-pool",
+                "size": 1,
+                "labels": ["master"],
+                "isControlPlane": True,
+                "useControlPlaneAsWorker": True,
+                "machinePoolProperties": {"archType": "amd64"},
+            },
         },
         {
-            "name": "worker-pool",
-            "size": 1,
-            "isControlPlane": False,
-            "useControlPlaneAsWorker": False,
-            "labels": ["worker"],
-            "taints": [],
-            "machinePoolProperties": {"archType": "amd64"},
-            "hosts": [{"hostUid": edge_host_uids[1]}] if len(edge_host_uids) > 1 else [],
-            "updateStrategy": {},
+            "cloudConfig": {
+                "edgeHosts": [{"hostUid": edge_host_uids[1]}] if len(edge_host_uids) > 1 else [],
+            },
+            "poolConfig": {
+                "name": "worker-pool",
+                "size": 1,
+                "labels": ["worker"],
+                "isControlPlane": False,
+                "machinePoolProperties": {"archType": "amd64"},
+            },
         },
     ]
 
     payload = {
         "metadata": {
             "name": name,
+            "labels": {},
             "annotations": {
                 "description": config["description"],
             },
         },
         "spec": {
             "cloudType": "edge-native",
-            "clusterConfig": {
-                "clusterResources": {"namespaces": [], "rbacs": []},
-                "hostClusterConfig": {
-                    "clusterEndpoint": {
-                        "config": {
-                            "ingressConfig": {"port": 6443},
-                        },
-                    },
-                    "isHostCluster": False,
-                },
-                "lifecycleConfig": {"pause": False},
-                "machineManagementConfig": {
-                    "osPatchConfig": {
-                        "patchOnBoot": False,
-                        "rebootIfRequired": False,
-                    },
+            "cloudConfig": {
+                "controlPlaneEndpoint": {
+                    "host": "172.16.30.244",
+                    "type": "VIP",
                 },
             },
             "machinepoolconfig": machine_pools,
