@@ -1,0 +1,39 @@
+# Static DPUNode aliases for this 2-node lab
+# DPF discovery creates DPUNodes named after DPU serial (`dpu-node-<serial>`)
+# but DMS expects DPUNodes named after the K8s host. Without these aliases,
+# DMS errors with "DPUNode <hostname> not found" and DPU phase blocks at OS Installing.
+#
+# Lab mapping:
+#   gpu1 K8s host = edge-7bf6f060000000000000ac1f6b24deb2  -> DPU serial mt24326005fn (BMC 172.16.30.36)
+#   gpu2 K8s host = gpu-sm02                                -> DPU serial mt2439600dak (BMC 172.16.30.33)
+#
+# Each DPUDevice's `provisioning.dpu.nvidia.com/dpunode-name` label is also re-pointed
+# at the alias by the dpunode-alias-controller CronJob (06-...yaml).
+---
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUNode
+metadata:
+  name: edge-7bf6f060000000000000ac1f6b24deb2
+  namespace: dpf-operator-system
+  labels:
+    dpu/use-case: passthrough
+    feature.node.kubernetes.io/dpu-enabled: "true"
+spec:
+  dpus:
+    - name: mt24326005fn
+  nodeRebootMethod:
+    external: {}
+---
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUNode
+metadata:
+  name: gpu-sm02
+  namespace: dpf-operator-system
+  labels:
+    dpu/use-case: passthrough
+    feature.node.kubernetes.io/dpu-enabled: "true"
+spec:
+  dpus:
+    - name: mt2439600dak
+  nodeRebootMethod:
+    external: {}

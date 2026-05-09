@@ -1,0 +1,185 @@
+# Host node-prep DaemonSet for DPF Zero Trust.
+# Achieves the same as patching edge-native-byoi stages, but as a manifest in the
+# dpf-zt-cluster pack so it can be added via the standard pack-manifest API.
+#
+# What it does on every node, idempotently, every 60s:
+#  - Ensures /etc/netplan/99-br-dpu-interfaces-mtu.yaml (br-dpu over enp129s0f0)
+#  - Ensures /etc/netplan/99-dpu-sriov.yaml (virtual-function-count: 46 on PF0/PF1)
+#  - Ensures pci=realloc in /etc/default/grub (and runs update-grub once)
+#  - netplan apply when files change
+#  - Binds any unbound mlx5_core VFs (PF0 sometimes left unbound)
+#  - Adds enp14s0f0v0 to br-dpu
+#
+# Note: pci=realloc requires a reboot to take effect (BIOS PCIe BAR sizing).
+# Operator must reboot once after first deploy if /var/run/dpf-grub-needs-reboot exists.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpf-host-prep
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpf-host-prep
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpf-host-prep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpf-host-prep
+subjects:
+  - kind: ServiceAccount
+    name: dpf-host-prep
+    namespace: dpf-operator-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dpf-host-prep
+  namespace: dpf-operator-system
+  labels:
+    app.kubernetes.io/component: dpf-zt-cluster
+spec:
+  selector:
+    matchLabels:
+      app: dpf-host-prep
+  template:
+    metadata:
+      labels:
+        app: dpf-host-prep
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      serviceAccountName: dpf-host-prep
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: prep
+          image: ubuntu:24.04
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: host
+              mountPath: /host
+            - name: dev
+              mountPath: /dev
+          command: [/bin/bash, -c]
+          args:
+            - |
+              set -u
+              while true; do
+                echo "[$(date -u +%FT%TZ)] dpf-host-prep tick on $NODE_NAME"
+
+                # ---------- 1. netplan files ----------
+                BR_DPU_F=/host/etc/netplan/99-br-dpu-interfaces-mtu.yaml
+                if ! grep -q 'br-dpu' "$BR_DPU_F" 2>/dev/null; then
+                  cat > "$BR_DPU_F" <<'NPCONF'
+              network:
+                version: 2
+                bridges:
+                  br-dpu:
+                    interfaces: [enp129s0f0]
+                    dhcp4: true
+                    dhcp4-overrides:
+                      route-metric: 5
+                    mtu: 1500
+                    parameters:
+                      stp: false
+                      forward-delay: 0
+              NPCONF
+                  chmod 600 "$BR_DPU_F"
+                  NETPLAN_DIRTY=1
+                fi
+
+                SRIOV_F=/host/etc/netplan/99-dpu-sriov.yaml
+                if ! grep -q 'virtual-function-count: 46' "$SRIOV_F" 2>/dev/null; then
+                  cat > "$SRIOV_F" <<'NPCONF'
+              network:
+                version: 2
+                renderer: networkd
+                ethernets:
+                  enp14s0f0np0:
+                    virtual-function-count: 46
+                    delay-virtual-functions-rebind: false
+                    mtu: 9216
+                  enp14s0f1np1:
+                    virtual-function-count: 46
+                    delay-virtual-functions-rebind: false
+                    mtu: 9216
+              NPCONF
+                  chmod 600 "$SRIOV_F"
+                  NETPLAN_DIRTY=1
+                fi
+
+                # ---------- 2. GRUB pci=realloc ----------
+                if ! grep -q 'pci=realloc' /host/etc/default/grub 2>/dev/null; then
+                  echo "  patching /etc/default/grub for pci=realloc"
+                  nsenter -t 1 -m -p -n bash -c "
+                    sed -i 's|^\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\)\"|\1 pci=realloc\"|' /etc/default/grub
+                    update-grub
+                    touch /var/run/dpf-grub-needs-reboot
+                  "
+                fi
+
+                # ---------- 3. apply netplan if dirty ----------
+                if [ "${NETPLAN_DIRTY:-0}" = "1" ]; then
+                  echo "  netplan changed, applying"
+                  nsenter -t 1 -m -p -n bash -c 'netplan generate; netplan apply || true'
+                  unset NETPLAN_DIRTY
+                fi
+
+                # ---------- 4. Bind unbound PF VFs to mlx5_core ----------
+                for pf in enp14s0f0np0 enp14s0f1np1; do
+                  base=/host/sys/class/net/$pf/device
+                  [ -d "$base" ] || continue
+                  for v in "$base"/virtfn*; do
+                    [ -e "$v" ] || continue
+                    p=$(readlink -f "$v")
+                    if [ ! -e "$p/driver" ]; then
+                      pci=$(basename "$p")
+                      echo "  binding $pci to mlx5_core"
+                      nsenter -t 1 -m bash -c "echo $pci > /sys/bus/pci/drivers/mlx5_core/bind 2>/dev/null || true"
+                    fi
+                  done
+                done
+
+                # ---------- 5. Add VF 0 to br-dpu ----------
+                nsenter -t 1 -n -p bash -c '
+                  if ip link show enp14s0f0v0 >/dev/null 2>&1 && ip link show br-dpu >/dev/null 2>&1; then
+                    if ! ip -br link show enp14s0f0v0 | grep -q br-dpu; then
+                      ip link set enp14s0f0v0 up
+                      ip link set enp14s0f0v0 master br-dpu || true
+                      echo "  added enp14s0f0v0 to br-dpu"
+                    fi
+                  fi
+                '
+
+                sleep 60
+              done
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+        - name: dev
+          hostPath:
+            path: /dev

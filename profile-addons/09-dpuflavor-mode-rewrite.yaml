@@ -1,0 +1,118 @@
+# DPF v25.10's nvidia-dpf-deployment helm chart ships DPUFlavors with
+# `dpuMode: zero-trust`, but the hostagent (DMS) only accepts `dpuMode: dpu`.
+# This causes DPU `FWConfigured=False (UnsupportedDPUMode)` and blocks BFB → Ready.
+#
+# DPUFlavor.spec is immutable, so rewriting requires a chain delete + recreate:
+#   DPU → DPUSet → DPUFlavor → recreate DPUFlavor (dpuMode: dpu) → recreate DPUSet
+#
+# Idempotent: if every DPUFlavor in dpf-operator-system already has
+# dpuMode != "zero-trust", the CronJob exits without touching anything.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpuflavor-mode-rewrite
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpuflavors", "dpusets", "dpus"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpuflavor-mode-rewrite
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpuflavor-mode-rewrite
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpuflavor-mode-rewrite
+subjects:
+  - kind: ServiceAccount
+    name: dpuflavor-mode-rewrite
+    namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpuflavor-mode-rewrite
+  namespace: dpf-operator-system
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          serviceAccountName: dpuflavor-mode-rewrite
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: alpine/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  NS=dpf-operator-system
+                  echo "[$(date -Iseconds)] scanning DPUFlavors in $NS"
+                  bad_flavors=$(kubectl get dpuflavor -n $NS -o jsonpath='{range .items[?(@.spec.dpuMode=="zero-trust")]}{.metadata.name} {end}')
+                  if [ -z "$bad_flavors" ]; then
+                    echo "[$(date -Iseconds)] no DPUFlavor has dpuMode=zero-trust; done"
+                    exit 0
+                  fi
+
+                  # awk: strip helm-managed metadata + top-level status from `kubectl get -o yaml`.
+                  # When invoked with -v rewrite_mode=1, also rewrites `dpuMode: zero-trust` -> `dpuMode: dpu`.
+                  STRIP_AWK='
+                    /^status:/ { in_status=1 }
+                    in_status { next }
+                    /^  (managedFields|finalizers|ownerReferences|annotations|labels):[[:space:]]*$/ { skip_block=1; next }
+                    skip_block && /^    / { next }
+                    skip_block && /^[^ ]/ { skip_block=0 }
+                    skip_block && /^  [^ ]/ { skip_block=0 }
+                    /^  (creationTimestamp|resourceVersion|uid|generation|selfLink):/ { next }
+                    rewrite_mode==1 && /^[[:space:]]+dpuMode:[[:space:]]+zero-trust[[:space:]]*$/ { sub(/zero-trust/, "dpu") }
+                    { print }
+                  '
+
+                  for flavor in $bad_flavors; do
+                    echo "[$(date -Iseconds)] rewriting DPUFlavor $flavor: zero-trust -> dpu"
+                    sets=$(kubectl get dpuset -n $NS -o jsonpath='{range .items[?(@.spec.dpuTemplate.spec.dpuFlavor=="'"$flavor"'")]}{.metadata.name} {end}')
+
+                    # Capture DPUSet specs for recreation
+                    for s in $sets; do
+                      kubectl get dpuset -n $NS "$s" -o yaml \
+                        | awk -v rewrite_mode=0 "$STRIP_AWK" > /tmp/dpuset-$s.yaml
+                    done
+
+                    # Capture flavor, mutate dpuMode
+                    kubectl get dpuflavor -n $NS "$flavor" -o yaml \
+                      | awk -v rewrite_mode=1 "$STRIP_AWK" > /tmp/dpuflavor-$flavor.yaml
+
+                    # Delete chain
+                    for dpu in $(kubectl get dpu -n $NS -o name); do
+                      kubectl patch -n $NS "$dpu" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+                    done
+                    kubectl delete dpu -n $NS --all --wait=false || true
+                    for s in $sets; do
+                      kubectl patch dpuset -n $NS "$s" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+                      kubectl delete dpuset -n $NS "$s" --wait=true || true
+                    done
+                    kubectl delete dpuflavor -n $NS "$flavor" --wait=true
+
+                    # Recreate
+                    kubectl create -f /tmp/dpuflavor-$flavor.yaml
+                    for s in $sets; do
+                      kubectl create -f /tmp/dpuset-$s.yaml
+                    done
+                    echo "[$(date -Iseconds)] $flavor done; recreated $sets"
+                  done

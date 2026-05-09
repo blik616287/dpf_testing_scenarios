@@ -1,0 +1,69 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: longhorn-deploy-patcher
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: longhorn-deploy-patcher
+  namespace: longhorn-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: longhorn-deploy-patcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: longhorn-deploy-patcher
+subjects:
+  - kind: ServiceAccount
+    name: longhorn-deploy-patcher
+    namespace: longhorn-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: longhorn-driver-deployer-patcher
+  namespace: longhorn-system
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          serviceAccountName: longhorn-deploy-patcher
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: alpine/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  if ! kubectl get deploy -n longhorn-system longhorn-driver-deployer >/dev/null 2>&1; then
+                    echo "longhorn-driver-deployer not found, skipping"
+                    exit 0
+                  fi
+                  cur=$(kubectl get deploy -n longhorn-system longhorn-driver-deployer -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="KUBELET_ROOT_DIR")].value}')
+                  if [ "$cur" = "/var/lib/kubelet" ]; then
+                    echo "already patched"
+                    exit 0
+                  fi
+                  echo "patching longhorn-driver-deployer to set KUBELET_ROOT_DIR=/var/lib/kubelet"
+                  # Strategic merge to add or replace the env var
+                  kubectl patch deploy -n longhorn-system longhorn-driver-deployer --type='strategic' -p='{
+                    "spec":{"template":{"spec":{"containers":[{"name":"longhorn-driver-deployer","env":[{"name":"KUBELET_ROOT_DIR","value":"/var/lib/kubelet"}]}]}}}
+                  }'

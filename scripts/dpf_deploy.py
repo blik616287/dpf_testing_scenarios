@@ -38,9 +38,10 @@ if not API_KEY or not PROJECT_UID:
     sys.exit(1)
 
 # Profile UIDs
-INFRA_PROFILE_UID = "69836cfbe0eb284f406fee60"   # DPF Zero Trust Control Plane - Agent
+INFRA_PROFILE_UID = "69f25bfa957ca8a8c6eeb06a"   # DPF ZT CP-Agent NetOp v2 (with hardening manifests)
 ADDON_CP_CONFIGS_UID = "69b7039ae8451ebc583d6a13" # Spectro-DPU-DPF-CP-Configs
 ADDON_PASSTHROUGH_UID = "69834c1973ed315efeaed916" # DPF Zero Trust Use Case - Passthrough
+ADDON_VPC_OVN_UID = "69fb7b33c4934d2627f3a67c"    # DPF Zero Trust Use Case - VPC-OVN Accelerated v2 (with full automation)
 ADDON_HBN_UID = "698dd2dd4b0c719b6c763605"        # DPF Zero Trust Use Case - DOCA HBN
 
 # Variable values per profile (Phase 0 discovered)
@@ -71,8 +72,8 @@ CLUSTER_CONFIGS = {
         "addon_profiles": [ADDON_CP_CONFIGS_UID, ADDON_PASSTHROUGH_UID],
     },
     "dpf-ovn-accelerated": {
-        "description": "OVN accelerated - DPF offload to BlueField DPU",
-        "addon_profiles": [ADDON_CP_CONFIGS_UID],
+        "description": "OVN accelerated - DPF VPC-OVN offload to BlueField DPU",
+        "addon_profiles": [ADDON_CP_CONFIGS_UID, ADDON_VPC_OVN_UID],
     },
     "dpf-ovn-hbn": {
         "description": "OVN + HBN - DPF offload + BGP/ECMP routing on BlueField DPU",

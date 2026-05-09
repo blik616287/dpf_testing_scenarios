@@ -1,0 +1,27 @@
+=== Cluster: dpf-ovn-baseline (DPF Zero Trust passthrough) ===
+Captured: 2026-05-04T15:51:18-07:00
+
+=== Kubernetes nodes ===
+NAME                                    STATUS   ROLES           AGE    VERSION   INTERNAL-IP     EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION     CONTAINER-RUNTIME
+edge-7bf6f060000000000000ac1f6b24deb2   Ready    control-plane   3d1h   v1.33.6   172.16.30.90    <none>        Ubuntu 24.04.4 LTS   6.8.0-94-generic   containerd://2.1.4
+gpu-sm02                                Ready    <none>          3d1h   v1.33.6   172.16.30.253   <none>        Ubuntu 24.04.4 LTS   6.8.0-94-generic   containerd://2.1.4
+
+=== gpu1 host info ===
+host: edge-7bf6f060000000000000ac1f6b24deb2
+kernel: 6.8.0-94-generic
+cpu: Intel(R) Xeon(R) CPU E5-2678 v3 @ 2.50GHz
+cores: 48
+ram: 251 GB
+PF0 NIC: 0e:00.0 Ethernet controller [0200]: Mellanox Technologies MT43244 BlueField-3 integrated ConnectX-7 network controller [15b3:a2dc] (rev 01)
+
+=== gpu2 host info ===
+host: gpu-sm02
+kernel: 6.8.0-94-generic
+cpu: Intel(R) Xeon(R) CPU E5-2678 v3 @ 2.50GHz
+cores: 48
+ram: 251 GB
+PF0 NIC: 0e:00.0 Ethernet controller [0200]: Mellanox Technologies MT43244 BlueField-3 integrated ConnectX-7 network controller [15b3:a2dc] (rev 01)
+
+=== Fabric IPs ===
+gpu1 PF0: 172.16.97.10/24 (MAC c4:70:bd:2b:f6:92)
+gpu2 PF0: 172.16.97.11/24 (MAC c4:70:bd:f0:65:c6)

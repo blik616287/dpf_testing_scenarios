@@ -1,0 +1,95 @@
+# Add this manifest to the `dpf-zt-cluster` pack alongside dpu-cluster, dpu-bmc-password,
+# dpu-discovery. Its job is to keep bootstrap-token-* Secrets in the kamaji tenant cluster
+# from expiring while DPUs are being provisioned, so the bootstrap-signer keeps the
+# jws-kubeconfig-* entries in kube-public/cluster-info, and `kubeadm join` on the DPU
+# can complete its discovery handshake.
+#
+# Without this, DPF generates bfcfg with a 24h-TTL token; if the DPU takes longer than
+# 24h to BFB-install + reboot + cloud-init + kubeadm-join, the token expires, the
+# tokencleaner controller deletes the Secret, bootstrap-signer removes the JWS sig from
+# cluster-info, and `kubeadm join` fails forever with:
+#   could not find a JWS signature in the cluster-info ConfigMap for token ID "<id>"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpf-bootstrap-token-keeper
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dpf-bootstrap-token-keeper-secret-reader
+  namespace: dpu-cplane-tenant1
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["dpu-cplane-tenant1-admin-kubeconfig"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dpf-bootstrap-token-keeper-secret-reader
+  namespace: dpu-cplane-tenant1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dpf-bootstrap-token-keeper-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: dpf-bootstrap-token-keeper
+    namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpf-bootstrap-token-keeper
+  namespace: dpf-operator-system
+  labels:
+    app.kubernetes.io/component: dpf-zt-cluster
+    app.kubernetes.io/managed-by: dpf-zt-cluster-pack
+spec:
+  schedule: "*/15 * * * *"   # every 15 minutes
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: dpf-bootstrap-token-keeper
+          restartPolicy: OnFailure
+          containers:
+            - name: keeper
+              image: alpine/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command: [/bin/bash, -c]
+              args:
+                - |
+                  set -euo pipefail
+
+                  echo "[$(date -u +%FT%TZ)] dpf-bootstrap-token-keeper run"
+
+                  # Pull the kamaji tenant admin kubeconfig from the host cluster
+                  kubectl -n dpu-cplane-tenant1 get secret dpu-cplane-tenant1-admin-kubeconfig \
+                    -o jsonpath='{.data.admin\.conf}' | base64 -d > /tmp/tenant.kubeconfig
+                  export KUBECONFIG=/tmp/tenant.kubeconfig
+
+                  # New expiration: 30 days from now.
+                  NEW_EXP="$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ)"
+                  NEW_EXP_B64="$(printf '%s' "$NEW_EXP" | base64 -w0)"
+
+                  for s in $(kubectl -n kube-system get secret -o name | grep '^secret/bootstrap-token-' || true); do
+                    cur="$(kubectl -n kube-system get $s -o jsonpath='{.data.expiration}' | base64 -d || echo unknown)"
+                    echo "  $s currentExpiration=$cur newExpiration=$NEW_EXP"
+                    kubectl -n kube-system patch $s --type=merge \
+                      -p "{\"data\":{\"expiration\":\"${NEW_EXP_B64}\"}}" >/dev/null
+                  done
+
+                  # Force a reconciliation so bootstrap-signer rewrites JWS sigs in cluster-info.
+                  kubectl -n kube-public annotate cm cluster-info \
+                    dpf.spectrocloud.com/poke="$(date -u +%s)" --overwrite >/dev/null || true
+
+                  echo "[$(date -u +%FT%TZ)] done"

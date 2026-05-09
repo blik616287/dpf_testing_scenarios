@@ -1,0 +1,125 @@
+# DPF v25.10.1 BFB transfer reliability fix.
+#
+# When the BMC pushes a BFB image to the DPU's eMMC during provisioning, it must own
+# the rshim device. If the BMC's `BmcRShimEnabled` is false (or "shared" mode),
+# concurrent host-side rshim probes (or any state mismatch) can abort the transfer
+# mid-flight with:
+#   Task N is in Exception state ... Transfer of image '...bfb' ... failed (Severity: Critical)
+#
+# We hit this on gpu2 during the v25.10.1 deploy — first BFB attempt aborted, the
+# DPU was left half-provisioned with corrupt cloud-init seed (couldn't login).
+# Manual fix was POSTing {"Rshim":"Forced"} to each BMC's Redfish action.
+#
+# This CronJob automates that across all DPUDevices every 15 minutes. It only
+# POSTs SetRshim when (a) the BMC reports rshim != "Forced" AND (b) no Redfish
+# task is in flight. This avoids two failure modes we hit at the previous 2-min,
+# unconditional cadence: SetRshim restarts the rshim service even when called
+# with the current value, which kills any concurrent BFB transfer (USB endpoint
+# disappears mid-stream → "Software caused connection abort" / "Task in
+# Exception state"). With the guards we only act when something has actually
+# drifted.
+#
+# Why: prevents the "Task X is in Exception state" BFB-transfer failures that put
+# a DPU into Phase=Error and require manual recreation, without the cronjob
+# itself becoming the cause of those aborts.
+# How to apply: deploys with the cluster profile; runs continuously without operator action.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpu-bmc-rshim-forcer
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpudevices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["bmc-shared-password"]
+    verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpu-bmc-rshim-forcer
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpu-bmc-rshim-forcer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpu-bmc-rshim-forcer
+subjects:
+  - kind: ServiceAccount
+    name: dpu-bmc-rshim-forcer
+    namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpu-bmc-rshim-forcer
+  namespace: dpf-operator-system
+spec:
+  # Every 15 min — the previous 2-min cadence ran often enough to interrupt
+  # in-progress BFB transfers. SetRshim is reasserted lazily; the profile only
+  # needs it when the BMC actually loses Forced state (rare, e.g. factory reset).
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          serviceAccountName: dpu-bmc-rshim-forcer
+          restartPolicy: OnFailure
+          containers:
+            - name: forcer
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -eu
+                  NS=dpf-operator-system
+                  PASS=$(kubectl -n $NS get secret bmc-shared-password -o jsonpath='{.data.password}' | base64 -d)
+                  USER=root
+                  for d in $(kubectl -n $NS get dpudevice -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.bmcIp}{":"}{.spec.bmcPort}{"\n"}{end}'); do
+                    name=$(echo "$d" | cut -d' ' -f1)
+                    addr=$(echo "$d" | cut -d' ' -f2)
+                    if [ -z "$addr" ] || [ "$addr" = ":" ]; then
+                      echo "[$(date -Iseconds)] $name has no BMC IP, skipping"
+                      continue
+                    fi
+
+                    # Skip if a TaskService task is in flight (BFB transfer
+                    # would be aborted by the rshim service restart).
+                    busy=$(curl -sk -u "$USER:$PASS" --max-time 8 \
+                      "https://${addr}/redfish/v1/TaskService/Tasks" 2>/dev/null | \
+                      grep -oE '"TaskState":"[^"]*"' | grep -oE 'Running|Starting|New' | head -1)
+                    if [ -n "$busy" ]; then
+                      echo "[$(date -Iseconds)] $name has active task ($busy), skipping"
+                      continue
+                    fi
+
+                    # Skip if rshim is already Forced — the SetRshim action
+                    # restarts the rshim service even when the value matches.
+                    current=$(curl -sk -u "$USER:$PASS" --max-time 8 \
+                      "https://${addr}/redfish/v1/Managers/Bluefield_BMC" 2>/dev/null | \
+                      grep -oE '"Rshim":"[^"]*"' | head -1)
+                    if echo "$current" | grep -q '"Rshim":"Forced"'; then
+                      echo "[$(date -Iseconds)] $name already Forced, skipping"
+                      continue
+                    fi
+
+                    echo "[$(date -Iseconds)] $name not Forced ($current), POSTing Forced"
+                    out=$(curl -sk -u "$USER:$PASS" -X POST -H "Content-Type: application/json" \
+                      "https://${addr}/redfish/v1/Managers/Bluefield_BMC/Actions/Oem/NvidiaManager.SetRshim" \
+                      -d '{"Rshim":"Forced"}' --max-time 8 || echo '{"err":"curl_failed"}')
+                    msg=$(echo "$out" | grep -oE '"Message":"[^"]*"' | head -1)
+                    echo "[$(date -Iseconds)] $name ($addr): $msg"
+                  done

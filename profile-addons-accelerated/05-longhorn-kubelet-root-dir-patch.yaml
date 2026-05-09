@@ -1,0 +1,88 @@
+# Spectro Palette installs kubelet at `/var/lib/kubelet` (not the systemd-default
+# /var/lib/kubelet path that upstream Longhorn assumes... it varies). The
+# longhorn-driver-deployer tries to AUTO-DETECT kubelet's --root-dir by spawning
+# a privileged hostPID pod (`discover-proc-kubelet-cmdline`) and reading
+# /proc/$kubelet/cmdline. That pod-spawn fails on Spectro Palette because the
+# apiserver→kubelet TLS path doesn't trust the kubelet self-signed cert (no IP SANs),
+# so `kubectl logs` / exec calls error with:
+#   tls: failed to verify certificate: x509: cannot validate certificate ... it doesn't contain any IP SANs
+# Auto-detection fails and the deployer crashloops with:
+#   failed to get arg root-dir. Need to specify "--kubelet-root-dir" in your Longhorn deployment yaml.
+#
+# Fix: append `--kubelet-root-dir /var/lib/kubelet` to the longhorn-driver-deployer
+# Deployment's command. (NOT an env var — older revisions tried KUBELET_ROOT_DIR; the
+# deployer ignores env, only reads cmdline flags.)
+#
+# Without this fix the entire cluster halts: no CSI driver → no PV provisioning →
+# kamaji-etcd PVCs Pending forever → kamaji tenant cluster never bootstraps →
+# DPF system DPUServices stuck Pending → no DPU provisioning.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: longhorn-deploy-patcher
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: longhorn-deploy-patcher
+  namespace: longhorn-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: longhorn-deploy-patcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: longhorn-deploy-patcher
+subjects:
+  - kind: ServiceAccount
+    name: longhorn-deploy-patcher
+    namespace: longhorn-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: longhorn-driver-deployer-patcher
+  namespace: longhorn-system
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          serviceAccountName: longhorn-deploy-patcher
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: alpine/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  if ! kubectl get deploy -n longhorn-system longhorn-driver-deployer >/dev/null 2>&1; then
+                    echo "longhorn-driver-deployer not found, skipping"
+                    exit 0
+                  fi
+                  cmd=$(kubectl get deploy -n longhorn-system longhorn-driver-deployer -o jsonpath='{.spec.template.spec.containers[0].command}')
+                  if echo "$cmd" | grep -q -- "--kubelet-root-dir"; then
+                    echo "already has --kubelet-root-dir flag, nothing to do"
+                    exit 0
+                  fi
+                  echo "appending --kubelet-root-dir /var/lib/kubelet to longhorn-driver-deployer command"
+                  kubectl patch deploy -n longhorn-system longhorn-driver-deployer --type=json -p='[
+                    {"op":"add","path":"/spec/template/spec/containers/0/command/-","value":"--kubelet-root-dir"},
+                    {"op":"add","path":"/spec/template/spec/containers/0/command/-","value":"/var/lib/kubelet"}
+                  ]'
+                  echo "patched; deployer pod will roll over to pick up flag"

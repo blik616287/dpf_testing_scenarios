@@ -1,0 +1,107 @@
+# Patch for edge-native-byoi pack values.
+# Adds host-level prerequisites for DPF Zero Trust:
+#   - pci=realloc kernel arg (required for sriov_totalvfs=46 instead of 16)
+#   - br-dpu Linux bridge with enp129s0f0 + enp14s0f0v0 (DPU OS host path)
+#   - 99-dpu-MT* netplan: virtual-function-count: 46 on both PFs
+#   - VF binding fix: rebind any unbound mlx5_core VFs after netplan apply
+# Place this in the cluster profile's `edge-native-byoi` pack values, replacing
+# its current `stages:` block.
+pack:
+  content:
+    images: []
+  drain:
+    drainPods: auto
+    cordon: true
+    timeout: 300
+    gracePeriod: -1
+    ignoreDaemonSets: true
+    deleteLocalData: true
+    force: true
+    disableEviction: false
+    skipWaitForDeleteTimeout: 0
+
+options:
+  system.uri: "NA"
+
+stages:
+  initramfs:
+    - name: "Install nfs-common (Longhorn) and ensure pci=realloc in GRUB"
+      commands:
+        - apt-get update && apt-get install -y nfs-common
+        - |
+          if ! grep -q 'pci=realloc' /etc/default/grub; then
+            sed -i 's|^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"$|\1 pci=realloc"|' /etc/default/grub
+            update-grub
+            touch /var/run/grub-needs-reboot
+          fi
+
+  boot.before:
+    - name: "Write br-dpu bridge netplan"
+      files:
+        - path: /etc/netplan/99-br-dpu-interfaces-mtu.yaml
+          permissions: "0600"
+          owner_string: "root:root"
+          content: |
+            network:
+              version: 2
+              bridges:
+                br-dpu:
+                  interfaces: [enp129s0f0]
+                  dhcp4: true
+                  dhcp4-overrides:
+                    route-metric: 5
+                  mtu: 1500
+                  parameters:
+                    stp: false
+                    forward-delay: 0
+    - name: "Write per-DPU SR-IOV netplan (46 VFs on both PFs)"
+      files:
+        - path: /etc/netplan/99-dpu-sriov.yaml
+          permissions: "0600"
+          owner_string: "root:root"
+          content: |
+            network:
+              version: 2
+              renderer: networkd
+              ethernets:
+                enp14s0f0np0:
+                  virtual-function-count: 46
+                  delay-virtual-functions-rebind: false
+                  mtu: 9216
+                enp14s0f1np1:
+                  virtual-function-count: 46
+                  delay-virtual-functions-rebind: false
+                  mtu: 9216
+    - name: "Apply netplan now (host gets br-dpu IP via DHCP)"
+      commands:
+        - netplan generate
+        - netplan apply || true
+
+  boot.after:
+    - name: "Tag CP nodes for Longhorn storage"
+      commands:
+        - |
+          if test -f /etc/kubernetes/admin.conf; then
+            kubectl annotate node $(hostname) node.longhorn.io/default-node-tags='["storage"]' --kubeconfig /etc/kubernetes/admin.conf --overwrite
+          fi
+    - name: "Bind any unbound DPU PF VFs to mlx5_core"
+      commands:
+        - |
+          for pf in enp14s0f0np0 enp14s0f1np1; do
+            base=/sys/class/net/$pf/device
+            [ -d "$base" ] || continue
+            for v in "$base"/virtfn*; do
+              [ -e "$v" ] || continue
+              p=$(readlink -f "$v")
+              if [ ! -e "$p/driver" ]; then
+                echo "$(basename "$p")" > /sys/bus/pci/drivers/mlx5_core/bind 2>/dev/null || true
+              fi
+            done
+          done
+    - name: "Add enp14s0f0v0 (DPU OS PCIe path) to br-dpu"
+      commands:
+        - |
+          if ip link show enp14s0f0v0 >/dev/null 2>&1 && ip link show br-dpu >/dev/null 2>&1; then
+            ip link set enp14s0f0v0 up
+            ip link set enp14s0f0v0 master br-dpu || true
+          fi

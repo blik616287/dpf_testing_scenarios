@@ -1,0 +1,99 @@
+# DPF v25.10.1 sets `provisioning.dpu.nvidia.com/dpunode-external-reboot-required` annotation
+# on a DPUNode after BFB activation completes. The DPF main controller blocks reconciling
+# any DPU on that node forward (DPU stuck in DPU Cluster Config / Ready check loop) until
+# that annotation is *manually removed* by an operator.
+#
+# Whoever wrote this assumed real-world ZT deployments have a human to push a button on the
+# host BMC after a DPU reflash. In automated A/B benchmarking we don't, so this CronJob
+# clears the annotation when:
+#   - the DPUNode's `.status.condition[type=DPUNodeReady] == True`, OR
+#   - the underlying DPU has reached `phase=DPU Cluster Config` (post-reboot already)
+#
+# Why: prevents the reboot annotation from blocking DPF state-machine progress unattended.
+# How to apply: deploys with the cluster profile; runs every 90s. Idempotent.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpunode-external-reboot-acker
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpunodes", "dpus"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpunode-external-reboot-acker
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpunode-external-reboot-acker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpunode-external-reboot-acker
+subjects:
+  - kind: ServiceAccount
+    name: dpunode-external-reboot-acker
+    namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpunode-external-reboot-acker
+  namespace: dpf-operator-system
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          serviceAccountName: dpunode-external-reboot-acker
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: alpine/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  NS=dpf-operator-system
+                  ANNO=provisioning.dpu.nvidia.com/dpunode-external-reboot-required
+
+                  for n in $(kubectl get dpunode -n $NS -o jsonpath='{range .items[*]}{.metadata.name} {end}'); do
+                    has=$(kubectl get dpunode -n $NS "$n" -o jsonpath="{.metadata.annotations['$ANNO']}" 2>/dev/null || echo "")
+                    if [ -z "$has" ]; then continue; fi
+
+                    # Decide whether it's safe to remove the annotation.
+                    # Look up the DPU(s) referencing this DPUNode and check their phase.
+                    safe=0
+                    for d in $(kubectl get dpu -n $NS -o jsonpath='{range .items[*]}{.metadata.name}@@{.spec.nodeName}{"\n"}{end}' | grep "@@$n$" | cut -d@ -f1); do
+                      phase=$(kubectl get dpu -n $NS "$d" -o jsonpath='{.status.phase}')
+                      case "$phase" in
+                        "DPU Cluster Config"|"Ready"|"Rebooting"|"OS Installing")
+                          safe=1
+                          ;;
+                      esac
+                    done
+
+                    # Also accept if the DPUNode itself reports Ready
+                    nready=$(kubectl get dpunode -n $NS "$n" \
+                      -o jsonpath='{.status.conditions[?(@.type=="DPUNodeReady")].status}')
+                    if [ "$nready" = "True" ]; then safe=1; fi
+
+                    if [ "$safe" = "1" ]; then
+                      echo "[$(date -Iseconds)] removing $ANNO from DPUNode/$n"
+                      kubectl annotate dpunode -n $NS "$n" "$ANNO-" --overwrite
+                    else
+                      echo "[$(date -Iseconds)] DPUNode/$n still has $ANNO but not in a safe phase yet"
+                    fi
+                  done

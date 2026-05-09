@@ -1,0 +1,116 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpunode-alias-controller
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpunodes", "dpudevices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpunode-alias-controller
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpunode-alias-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpunode-alias-controller
+subjects:
+  - kind: ServiceAccount
+    name: dpunode-alias-controller
+    namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpunode-alias-controller
+  namespace: dpf-operator-system
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          serviceAccountName: dpunode-alias-controller
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: alpine/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  echo "=== DPUNode alias controller ==="
+                  # For each DPUDevice, find the matching K8s node by ARP-pinging the BMC
+                  # from each K8s node (we can't, but we have an indirect mapping):
+                  # The DPUDevice has 'spec.bmcIp'. The K8s node hosting that DPU is the
+                  # one whose host's PCIe BlueField device's BMC has that IP.
+                  # We can't probe from here, but the existing serial-named DPUNode
+                  # gives us a mapping (via spec.dpus) that we can use:
+                  # serial-named DPUNode (e.g., dpu-node-mt24326005fn) holds spec.dpus[name=serial].
+                  # We need to know which K8s node corresponds. For this we use the heuristic:
+                  # the only K8s node that NFD labels with the matching PCI vendor 15b3 + DPU 0e:00.0
+                  # If the lab has 2 nodes both with BlueField, we cannot disambiguate without
+                  # extra data. So: this CronJob requires per-node mapping via annotation.
+                  #
+                  # Annotation contract: each K8s node MUST have annotation
+                  #   dpf.spectrocloud.com/dpu-serial=<serial>
+                  # If absent, this CronJob exits with no-op for that node.
+                  #
+                  for nodename in $(kubectl get nodes -l feature.node.kubernetes.io/dpu-enabled=true -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                    serial=$(kubectl get node "$nodename" -o jsonpath='{.metadata.annotations.dpf\.spectrocloud\.com/dpu-serial}')
+                    if [ -z "$serial" ]; then
+                      echo "node $nodename: no dpf.spectrocloud.com/dpu-serial annotation, skipping"
+                      continue
+                    fi
+                    serial_lc=$(echo "$serial" | tr 'A-Z' 'a-z')
+                    echo "node $nodename -> DPU serial $serial_lc"
+                    # Check if alias DPUNode already exists
+                    if kubectl get dpunode -n dpf-operator-system "$nodename" >/dev/null 2>&1; then
+                      echo "  alias DPUNode $nodename already exists"
+                    else
+                      # Need to delete the serial-named DPUNode first, then create alias
+                      old="dpu-node-$serial_lc"
+                      if kubectl get dpunode -n dpf-operator-system "$old" >/dev/null 2>&1; then
+                        echo "  removing $old finalizers"
+                        kubectl patch dpunode -n dpf-operator-system "$old" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+                        kubectl delete dpunode -n dpf-operator-system "$old" --wait=false --ignore-not-found 2>/dev/null || true
+                        sleep 5
+                      fi
+                      echo "  creating DPUNode $nodename -> serial $serial_lc"
+                      cat <<EOF | kubectl apply -f -
+                  apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+                  kind: DPUNode
+                  metadata:
+                    name: $nodename
+                    namespace: dpf-operator-system
+                    labels:
+                      dpu/use-case: passthrough
+                      feature.node.kubernetes.io/dpu-enabled: "true"
+                  spec:
+                    dpus:
+                      - name: $serial_lc
+                    nodeRebootMethod:
+                      external: {}
+                  EOF
+                    fi
+                    # Update DPUDevice label to point to the alias
+                    kubectl label dpudevice -n dpf-operator-system "$serial_lc" \
+                      provisioning.dpu.nvidia.com/dpunode-name="$nodename" --overwrite 2>/dev/null || true
+                  done

@@ -1,0 +1,157 @@
+# Auto-discovers DPU serial per K8s node and annotates the node.
+# Then a CronJob (08b) reads those annotations and creates host-named DPUNode aliases
+# + relabels DPUDevices to point at the alias.
+#
+# How discovery works:
+#   1. The DaemonSet runs on each node labeled feature.node.kubernetes.io/dpu-enabled=true
+#   2. It reads the host PF MAC (typically c4:70:bd:XX:XX:XX on a BlueField host)
+#   3. For each DPUDevice CR, it queries the BMC via Redfish for eth1's MAC
+#   4. The DPUDevice whose eth1 MAC shares the first 5 bytes with the host PF MAC is
+#      this node's local DPU. Annotates the node with dpf.spectrocloud.com/dpu-serial
+#
+# Why this works: each BlueField card has a single MAC OUI block; host PF and DPU eth1
+# MACs differ only in the last byte. No two BlueField cards share an OUI block.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpunode-discovery
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpudevices"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpunode-discovery
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpunode-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpunode-discovery
+subjects:
+  - kind: ServiceAccount
+    name: dpunode-discovery
+    namespace: dpf-operator-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dpunode-discovery-script
+  namespace: dpf-operator-system
+data:
+  discover.sh: |
+    #!/bin/sh
+    set -e
+    NODE="${KUBE_NODE_NAME:?}"
+    HOST_PF_NETDEV="${HOST_PF_NETDEV:-enp14s0f0np0}"
+    HOST_PF_MAC=$(cat /host/sys/class/net/$HOST_PF_NETDEV/address 2>/dev/null | tr 'A-Z' 'a-z')
+    if [ -z "$HOST_PF_MAC" ]; then
+      echo "$(date -Iseconds) [discover] cannot read host PF MAC at /host/sys/class/net/$HOST_PF_NETDEV/address; skipping"
+      exit 0
+    fi
+    HOST_OUI=$(echo "$HOST_PF_MAC" | cut -c1-14)   # first 5 bytes (e.g. c4:70:bd:2b:f6)
+    echo "$(date -Iseconds) [discover] node=$NODE host PF $HOST_PF_NETDEV MAC=$HOST_PF_MAC oui5=$HOST_OUI"
+
+    # BMC creds — pulled from DPF's standard secret (set by dpf-deployment values var dpuOobPassword)
+    BMC_USER="root"
+    BMC_PASS=$(cat /etc/dpu-bmc/password 2>/dev/null || echo "")
+    if [ -z "$BMC_PASS" ]; then
+      echo "$(date -Iseconds) [discover] no BMC password mounted at /etc/dpu-bmc/password; skipping"
+      exit 0
+    fi
+
+    # Iterate DPUDevices, query BMC eth1 MAC, match by OUI/5-byte prefix
+    for serial in $(kubectl get dpudevice -n dpf-operator-system -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+      bmc_ip=$(kubectl get dpudevice -n dpf-operator-system "$serial" -o jsonpath='{.spec.bmcIp}')
+      [ -z "$bmc_ip" ] && continue
+      eth1_mac=$(curl -sk --max-time 5 -u "$BMC_USER:$BMC_PASS" \
+        "https://$bmc_ip/redfish/v1/Systems/Bluefield/EthernetInterfaces/eth1" \
+        | sed -n 's/.*"MACAddress": *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z')
+      [ -z "$eth1_mac" ] && continue
+      eth1_oui=$(echo "$eth1_mac" | cut -c1-14)
+      echo "$(date -Iseconds) [discover]   DPUDevice $serial bmc=$bmc_ip eth1_mac=$eth1_mac oui5=$eth1_oui"
+      if [ "$eth1_oui" = "$HOST_OUI" ]; then
+        echo "$(date -Iseconds) [discover] MATCH: node $NODE -> DPU $serial"
+        kubectl annotate node "$NODE" "dpf.spectrocloud.com/dpu-serial=$serial" --overwrite
+        exit 0
+      fi
+    done
+    echo "$(date -Iseconds) [discover] no DPUDevice matches host PF OUI $HOST_OUI on node $NODE"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dpunode-discovery
+  namespace: dpf-operator-system
+spec:
+  selector:
+    matchLabels:
+      app: dpunode-discovery
+  template:
+    metadata:
+      labels:
+        app: dpunode-discovery
+    spec:
+      serviceAccountName: dpunode-discovery
+      hostPID: false
+      hostNetwork: false
+      tolerations:
+        - operator: Exists
+      nodeSelector:
+        feature.node.kubernetes.io/dpu-enabled: "true"
+      containers:
+        - name: discover
+          image: alpine/kubectl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              while :; do
+                /scripts/discover.sh || true
+                sleep 300
+              done
+          env:
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: HOST_PF_NETDEV
+              value: enp14s0f0np0
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: host-sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: bmc-creds
+              mountPath: /etc/dpu-bmc
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: dpunode-discovery-script
+            defaultMode: 0o755
+        - name: host-sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: bmc-creds
+          secret:
+            secretName: bmc-shared-password
+            optional: true
+            items:
+              - key: password
+                path: password

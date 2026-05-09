@@ -1,0 +1,51 @@
+[15:59:55] Configuring host PF IPs
+[15:59:57] Cleaning up any previous server processes
+[15:59:59] Starting servers on gpu2 (172.16.97.11)
+[16:00:03] Verifying servers
+tcp   LISTEN 0      4096                                                                                                   172.16.97.11:5201              0.0.0.0:*    users:(("iperf3",pid=2252729,fd=3))   
+tcp   LISTEN 0      1024                                                                                                   172.16.97.11:12865             0.0.0.0:*    users:(("netserver",pid=2252783,fd=3))
+[16:00:03] Connectivity check
+[16:00:05]   ✓ gpu1 → gpu2 reachable
+[16:00:05] ===== STARTING BENCHMARK MATRIX =====
+[16:00:05] Cluster: dpf-ovn-baseline (passthrough), 5 runs each, 60s per run
+[16:00:05] === Round 1 / 5 ===
+[16:00:05]   ▶ iperf3-tcp-1stream run1
+[16:01:38]   ▶ iperf3-tcp-8stream run1
+[16:03:12]   ▶ iperf3-tcp-16stream run1
+[16:04:46]   ▶ iperf3-udp-max run1
+[16:06:21]   ▶ iperf3-udp-64b run1
+[16:07:56]   ▶ iperf3-udp-1400b run1
+[16:09:31]   ▶ netperf-tcp-rr run1
+[16:11:06]   ▶ netperf-udp-rr run1
+[16:12:40]   ▶ netperf-tcp-stream-1b run1
+[16:14:15]   ▶ sockperf-pingpong run1
+[16:15:53]   ▶ netperf-tcp-crr run1
+[16:16:27] === Round 2 / 5 ===
+[16:16:27]   ▶ iperf3-tcp-1stream run2
+[16:18:02]   ▶ iperf3-tcp-8stream run2
+[16:19:37]   ▶ iperf3-tcp-16stream run2
+[16:21:12]   ▶ iperf3-udp-max run2
+[16:22:47]   ▶ iperf3-udp-64b run2
+[16:24:21]   ▶ iperf3-udp-1400b run2
+[16:25:56]   ▶ netperf-tcp-rr run2
+[16:27:31]   ▶ netperf-udp-rr run2
+[16:29:06]   ▶ netperf-tcp-stream-1b run2
+[16:30:41]   ▶ sockperf-pingpong run2
+[16:32:19]   ▶ netperf-tcp-crr run2
+[16:32:53] === Round 3 / 5 ===
+[16:32:53]   ▶ iperf3-tcp-1stream run3
+[16:34:27]   ▶ iperf3-tcp-8stream run3
+[16:36:02]   ▶ iperf3-tcp-16stream run3
+[16:37:37]   ▶ iperf3-udp-max run3
+[16:39:12]   ▶ iperf3-udp-64b run3
+[16:40:47]   ▶ iperf3-udp-1400b run3
+[16:42:22]   ▶ netperf-tcp-rr run3
+[16:43:57]   ▶ netperf-udp-rr run3
+[16:45:32]   ▶ netperf-tcp-stream-1b run3
+[16:47:07]   ▶ sockperf-pingpong run3
+[16:48:45]   ▶ netperf-tcp-crr run3
+[16:49:20] === Round 4 / 5 ===
+[16:49:20]   ▶ iperf3-tcp-1stream run4
+[16:50:54]   ▶ iperf3-tcp-8stream run4
+[16:52:29]   ▶ iperf3-tcp-16stream run4
+[16:54:04]   ▶ iperf3-udp-max run4

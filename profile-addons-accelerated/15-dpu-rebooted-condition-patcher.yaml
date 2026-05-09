@@ -1,0 +1,117 @@
+# DPF v25.10.1 has a bug in its DPU reboot-verifier: it tries to confirm the
+# DPU has rebooted by looking up the host's rshim device at the DPU's PCI
+# address (e.g., /dev/rshim* on the host). In Zero Trust mode there is no
+# host-side rshim — the rshim is on the DPU's BMC. The verifier's PCI lookup
+# always fails and the DPU stalls in Phase=Rebooting forever:
+#
+#   FailedToReboot: failed to find DPU rshim for PCI address: 0000:0e:00.
+#   err: can't find rshim address on device: 0000:0e:00
+#
+# Manual workaround: patch the DPU's status.conditions[Rebooted] = True to
+# bypass the gate, since the DPU is genuinely already running (BMC reports
+# `BootProgress: OsIsRunning` while DPF is still waiting on its bogus rshim
+# probe).
+#
+# This CronJob automates that. It only patches DPUs that:
+#   1. Are in Phase=Rebooting
+#   2. Have status.conditions[Rebooted].reason=FailedToReboot with the
+#      "can't find rshim" message (so we don't bypass legitimate reboot failures)
+#   3. Have status.conditions[OSInstalled]=True (i.e., BFB install completed)
+#
+# After patching, DPF advances the DPU to Phase=Host Network Configuration.
+# The v25.10.1 controller doesn't have a handler for that phase either (separate
+# bug), so we ALSO advance the phase directly to "DPU Cluster Config" so the
+# DPU can join the tenant cluster.
+#
+# Why: prevents Phase=Rebooting from blocking forever in ZT clusters.
+# How to apply: deploys with the cluster profile; runs every 90s, idempotent.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpu-rebooted-patcher
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpus", "dpus/status"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpu-rebooted-patcher
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpu-rebooted-patcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpu-rebooted-patcher
+subjects:
+  - kind: ServiceAccount
+    name: dpu-rebooted-patcher
+    namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpu-rebooted-patcher
+  namespace: dpf-operator-system
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          serviceAccountName: dpu-rebooted-patcher
+          restartPolicy: OnFailure
+          containers:
+            - name: patcher
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -eu
+                  NS=dpf-operator-system
+
+                  for d in $(kubectl -n $NS get dpu -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                    phase=$(kubectl -n $NS get dpu $d -o jsonpath='{.status.phase}' 2>/dev/null)
+                    osinst=$(kubectl -n $NS get dpu $d -o jsonpath='{.status.conditions[?(@.type=="OSInstalled")].status}' 2>/dev/null)
+                    reason=$(kubectl -n $NS get dpu $d -o jsonpath='{.status.conditions[?(@.type=="Rebooted")].reason}' 2>/dev/null)
+                    msg=$(kubectl -n $NS get dpu $d -o jsonpath='{.status.conditions[?(@.type=="Rebooted")].message}' 2>/dev/null)
+
+                    if [ "$phase" != "Rebooting" ]; then continue; fi
+                    if [ "$osinst" != "True" ]; then continue; fi
+                    if [ "$reason" != "FailedToReboot" ]; then continue; fi
+                    case "$msg" in
+                      *"can't find rshim address"*|*"failed to find DPU rshim"*) ;;
+                      *) continue ;;
+                    esac
+
+                    echo "[$(date -Iseconds)] patching $d: Rebooted=True + phase=DPU Cluster Config"
+                    NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                    kubectl -n $NS patch dpu $d --subresource=status --type=json -p "[
+                      {\"op\":\"replace\",\"path\":\"/status/conditions\",\"value\":[
+                        {\"type\":\"Rebooted\",\"status\":\"True\",\"reason\":\"Rebooted\",\"message\":\"bypassed by dpu-rebooted-patcher (DPF v25.10.1 host-rshim probe bug)\",\"lastTransitionTime\":\"$NOW\"},
+                        {\"type\":\"BFBPrepared\",\"status\":\"True\",\"reason\":\"BFBPrepared\",\"message\":\"\",\"lastTransitionTime\":\"$NOW\"},
+                        {\"type\":\"BFBReady\",\"status\":\"True\",\"reason\":\"BFBReady\",\"message\":\"\",\"lastTransitionTime\":\"$NOW\"},
+                        {\"type\":\"BFBTransferred\",\"status\":\"True\",\"reason\":\"BFBTransferred\",\"message\":\"\",\"lastTransitionTime\":\"$NOW\"},
+                        {\"type\":\"FWConfigured\",\"status\":\"True\",\"reason\":\"FWConfigured\",\"message\":\"\",\"lastTransitionTime\":\"$NOW\"},
+                        {\"type\":\"Initialized\",\"status\":\"True\",\"reason\":\"Initialized\",\"message\":\"\",\"lastTransitionTime\":\"$NOW\"},
+                        {\"type\":\"InterfaceInitialized\",\"status\":\"True\",\"reason\":\"InterfaceInitialized\",\"message\":\"\",\"lastTransitionTime\":\"$NOW\"},
+                        {\"type\":\"NodeEffectReady\",\"status\":\"True\",\"reason\":\"NoEffect\",\"message\":\"\",\"lastTransitionTime\":\"$NOW\"},
+                        {\"type\":\"OSInstalled\",\"status\":\"True\",\"reason\":\"OSInstalled\",\"message\":\"\",\"lastTransitionTime\":\"$NOW\"}
+                      ]}
+                    ]"
+                    # Force phase advance past unsupported "Host Network Configuration"
+                    kubectl -n $NS patch dpu $d --subresource=status --type=merge \
+                      -p '{"status":{"phase":"DPU Cluster Config"}}'
+                  done
