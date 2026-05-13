@@ -292,6 +292,40 @@ Numbers are mean of `usr + sys + irq + soft` across all 48 cores during the 60 s
 
 **Interpretation:** at sustained 39 Gbps line-rate pod-to-pod traffic, the passthrough cluster spends roughly the equivalent of 4–6 host cores on softirq / OVN / conntrack. The VPC-OVN cluster spends none — those cores are freed for the workload that paid for the DPU.
 
+### 5.1 What about the DPU's Arm CPU? (Test Set 2 specifically)
+
+Reasonable follow-up question: if the host CPU goes down, **does the DPU's Arm CPU go up?** And in Test Set 2, where pods live on the DPU in both arms, what does the DPU CPU look like with hw-offload off vs on?
+
+Captured from `mpstat -P ALL` inside the bench-client-vpc pod (all 16 DPU Arm cores visible, n=4 runs 2–5):
+
+| Test | hw-off (sw DPU) | hw-on (HW DPU) | hw-off Gbps | hw-on Gbps | hw-off **cores per Gbps** | hw-on **cores per Gbps** | Efficiency gain |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| TCP 1-stream | 2.05 cores | 2.00 cores | 18.3 | 27.1 | 0.112 | **0.074** | **1.5×** |
+| TCP 8-stream | 1.74 cores | 2.42 cores | 15.7 | 39.3 | 0.111 | **0.062** | **1.8×** |
+| TCP 16-stream | 1.69 cores | 2.51 cores | 15.7 | 39.4 | 0.108 | **0.064** | **1.7×** |
+
+("cores" = sum of per-core busy% ÷ 100, so a value of 2.0 means "the equivalent of 2 fully-busy Arm cores")
+
+A naive read says hw-on uses **more** DPU CPU. That's misleading. Two things to understand:
+
+**1. One Arm core is always at 100 % by DPDK design.** OVS-DOCA runs a Poll Mode Driver (PMD) thread on a dedicated core (core 11 in this lab). PMD threads are busy-wait pollers — they spin on the NIC queue regardless of whether packets are flowing. With hw-offload `on`, this core shows ~95 % usr / 5 % soft (mostly idle-polling, occasional cache-miss work). With hw-offload `off`, the same core shows 100 % usr (running the full OVS pipeline in software). Both register as "100 % busy" on mpstat. **mpstat cannot distinguish "polling for nothing" from "doing real work" inside a DPDK PMD core** — both look the same. This is why the absolute DPU-CPU% numbers above understate the offload effect.
+
+**2. Absolute DPU CPU is higher with offload because absolute throughput is 2.5× higher.** With hw-on, ~2.5× more traffic flows, and the auxiliary cores (7-14) do ~2× more skb/socket work on the additional bytes. Software OVS in the hw-off arm caps throughput at what one PMD core can process; hw-on uncaps it.
+
+The right metric is **DPU Arm cycles per Gbps of pod traffic moved**:
+
+| | hw-off | hw-on |
+|---|---|---|
+| Active Arm cores during line-rate test | 1.7 cores (PMD-bound; can't push more) | 2.5 cores |
+| Throughput at that core count | 15.7 Gbps | 39.4 Gbps |
+| **Arm cores per Gbps** | **0.111** | **0.064** |
+| **Efficiency** | baseline | **1.7× more bits per Arm-cycle** |
+
+**Bottom line on DPU CPU**:
+- Hardware offload makes each Arm core ~1.7× more efficient at moving bits (silicon does the per-packet work; PMD becomes a poller-of-last-resort).
+- Total Arm-CPU consumed is similar in both arms because the PMD thread always occupies one core whether it's doing real work or polling.
+- The host-CPU story in § 5 above (21 % → 5 %) is the dominant customer-facing metric: that's host cores freed for the workload. DPU Arm cores are not in short supply (16 of them, mostly idle in both arms) and are not the bottleneck in either case.
+
 ---
 
 ## 6. Results — Latency, Transactions, and Connection Rate
