@@ -1,11 +1,15 @@
 # DPF Pod-to-Pod Acceleration Benchmark Report
 
-**Status:** Test Cases 1 & 2 complete (passthrough vs VPC-OVN). Test Cases 3 & 4 (HBN/ECMP) pending fabric reconfiguration — see [§ 7. Pending Work](#7-pending-work-test-cases-3--4--hbnecmp).
+**Status:**
+- **Test Set 1** (Cilium passthrough ↔ VPC-OVN accelerated) — complete, n=4
+- **Test Set 2** (VPC-OVN hw-offload off ↔ on, apples-to-apples) — complete, n=4
+- **Test Cases 3 & 4** (HBN/ECMP) — first fabric ask **complete and validated** (Eth1/24/26 routed /31s, BGP Established on each DPU's `p1`); second fabric ask **open with network team** for the ECMP scaling test. See [§ 7. HBN Readiness](#7-hbn-readiness--test-cases-3--4).
 
-**Date:** 2026-05-08
+**Date:** 2026-05-13 (Test Set 2 + HBN underlay added 2026-05-13; Test Set 1 results from 2026-05-08)
 **Authors:** DPF testing team
-**Source data:** `results/dpf-ovn-baseline/`, `results/dpf-ovn-accelerated/`
+**Source data:** `results/dpf-ovn-baseline/` (Test Set 1 baseline), `results/dpf-ovn-accelerated/` (Test Set 1 cluster B + Test Set 2 accelerated arm), `results/dpf-ovn-accelerated-no-offload/` (Test Set 2 baseline)
 **Charts:** `results/charts/`
+**Companion docs:** [`STACK_EXPLANATION.md`](STACK_EXPLANATION.md) (full stack details), [`FABRIC_HBN_ECMP_REQUEST.md`](FABRIC_HBN_ECMP_REQUEST.md) (first fabric ask), [`FABRIC_HBN_SECOND_PEERING_REQUEST.md`](FABRIC_HBN_SECOND_PEERING_REQUEST.md) (open second ask)
 
 ---
 
@@ -39,55 +43,165 @@ The story isn't that throughput went up — at the per-link fabric ceiling of 40
 
 | Component | gpu1 | gpu2 |
 |---|---|---|
-| Host | x86_64 | x86_64 |
-| BlueField-3 DPU | MT24326005FN | MT2439600DAK |
-| DPU FW / OS | DOCA Ubuntu 24.04, OVS-DOCA 3.2.1005 | same |
-| 40 G fabric NIC | enp14s0f0np0 → DPU p0 | enp14s0f0np0 → DPU p0 |
-| Mgmt NIC (1 G OOB) | enp129s0f0 (172.16.30.90) | enp129s0f0 (172.16.30.253) |
-| BMC | 172.16.30.36 | 172.16.30.33 |
-| DPU OOB IP (post-install) | 172.16.30.29 | 172.16.30.20 |
-| DPU geneve VTEP | 172.16.97.98/27 | 172.16.97.102/27 |
+| Host chassis | Supermicro SYS-4028GR-TR2 (X10 family, 4U GPU server) | same model |
+| Host motherboard | Supermicro X10DRG-O+-CPU rev 1.00, BIOS AMI v3.2 (2019-12-13) | same |
+| Host CPU | 2× Intel Xeon E5-2678 v3 (Haswell-EP, 12c/24t per socket, 2.5/3.6 GHz, μcode 0x43) — **48 threads total**, 2 NUMA nodes | same |
+| Host memory | 251 GiB DDR4-2133 ECC RDIMM (8 of 24 DIMM slots populated, Samsung M386A4G40DM0-CPB) | same |
+| Host PSU | 2× Supermicro PWS-2K05A-1R 2 kW (redundant 1+1) | same |
+| Host GPUs (installed but unused for this test) | 2× NVIDIA Quadro RTX 6000/8000 (TU102GL) — present, not exercised | same |
+| Host BMC | Supermicro IPMI, firmware 3.86, ASPEED VGA | same |
+| **BlueField-3 DPU** | NVIDIA B3220 P-Series FHHL (part 900-9D3B6-00CV-A_Ax), PSID `MT_0000000884` | same |
+| DPU serial | `MT24326005FN` | `MT2439600DAK` |
+| DPU SoC | 16× Arm Cortex-A78AE (aarch64) | same |
+| DPU on-board RAM | 32 GiB DDR (ECC) | same |
+| DPU on-board storage | 38.9 GB eMMC + 119.2 GB Toshiba KBG40ZPZ128G NVMe (M.2) | same |
+| DPU firmware | NIC FW 32.47.1088, UEFI 14.40.0010, PXE 3.8.0201 | same |
+| DPU OS / kernel | DOCA Ubuntu 24.04.3 LTS / 6.8.0-1013-bluefield-64k (64 KB pages) | same |
+| DPU OVS-DOCA | 3.2.1005, DB schema 8.5.1 | same |
+| DPU integrated BMC | OpenBMC BF-25.10-15 (build 2025-12-09) at 172.16.30.36 | at 172.16.30.33 |
+| DPU PCIe slot in host | CPU1 SLOT10 | same |
+| PCIe link host ↔ BF3 | x16 @ 8 GT/s (Gen3 — downgraded from BF3-native Gen5; host root complex is Gen3) | same |
+| **DPU `p0` — 40 G fabric port 0** | host-side `enp14s0f0np0`, DPU-side `p0` (DPDK), MAC `c4:70:bd:2b:f6:a2`, MTU 9216, **carries VPC-OVN geneve underlay** in Test Sets 1 & 2 | host-side `enp14s0f0np0`, DPU-side `p0`, MAC `c4:70:bd:f0:65:d6` |
+| **DPU `p1` — 40 G fabric port 1** | host-side `enp14s0f1np1`, DPU-side `p1`, MAC `c4:70:bd:2b:f6:a3`, MTU 9216 — **brought up for HBN underlay testing**, routed `/31` with BGP to leaf | host-side `enp14s0f1np1`, DPU-side `p1`, MAC `c4:70:bd:f0:65:d7` |
+| Mgmt NIC (1 G OOB) | Intel I350 dual-port (`enp129s0f0/f1`), IP 172.16.30.90 on f0 | IP 172.16.30.253 |
+| Secondary mgmt NIC (10 G copper) | Intel X540-AT2 (`ens1f0`), upstream lab connectivity / image pulls — not on bench data path | same |
+| Host BMC IP | (Supermicro IPMI on `enp129s0f0` mgmt LAN) | same |
+| DPU BMC IP | 172.16.30.36 | 172.16.30.33 |
+| DPU OOB IP (post-install, on `oob_net0`) | 172.16.30.29 | 172.16.30.20 |
+| **DPU `ovnvtep` (geneve src in VPC-OVN)** | 172.16.97.98/27 (OVS internal port on `br-ovn-ext`) — VLAN 497 underlay | 172.16.97.102/27 |
+| **DPU `p1` /31 IP (HBN underlay, Test Set 3 prep)** | `172.16.97.249/31` ↔ leaf `172.16.97.248/31` on Eth1/24 | `172.16.97.251/31` ↔ leaf `172.16.97.250/31` on Eth1/26 |
+| **DPU BGP ASN (HBN underlay)** | 65010 (eBGP to leaf AS 65001) | 65020 |
+
+#### Fabric switch wiring
+
+| Switchport on `custeng.leaf1.1` (Cisco Nexus, NX-OS 9.3(11)) | Connects to | Config | Status |
+|---|---|---|---|
+| **Eth1/23** | gpu1 DPU `p0` | `switchport access vlan 497` (`dpf-dummy-fabric`), MTU 9216 | up, carrying VPC-OVN geneve underlay |
+| **Eth1/24** | gpu1 DPU `p1` | `no switchport`, `ip address 172.16.97.248/31`, MTU 9216; eBGP neighbor `172.16.97.249` remote-as 65010 | up, BGP Established (123 prefixes received from leaf) |
+| **Eth1/25** | gpu2 DPU `p0` | `switchport access vlan 497`, MTU 9216 | up, carrying VPC-OVN geneve underlay |
+| **Eth1/26** | gpu2 DPU `p1` | `no switchport`, `ip address 172.16.97.250/31`, MTU 9216; eBGP neighbor `172.16.97.251` remote-as 65020 | up, BGP Established |
+| Cable type (all four) | QSFP-H40G-AOC15M (40 Gb/s active optical) | — | — |
+| Leaf loopback (advertised via BGP to each DPU) | — | `11.0.0.111/32` | reachable from each DPU at ~0.5 ms RTT |
 
 ### 2.2 Software
 
 - DPF: v25.10.1 (Zero Trust mode, NetOp v2 profile)
-- Kubernetes: tenant cluster v1.33.6 (kamaji-managed)
-- Host CNI (host cluster): Cilium
-- DPU pod CNI (tenant cluster, default): Flannel; secondary network on bench-net via OVS CNI + nv-ipam (VPC-OVN)
+- Kubernetes: host cluster v1.33.6; tenant cluster v1.33.6 (kamaji-managed)
+- Host CNI (host cluster): Cilium v1.18.4 (eBPF)
+- DPU pod CNI (tenant cluster, default): Flannel; **secondary network on `bench-net` via Multus + OVS CNI + nv-ipam** (this is the VPC-OVN net1 interface used by the bench pods)
+- DPU OS: DOCA Ubuntu 24.04.3 LTS, kernel 6.8.0-1013-bluefield-64k (64 KB pages)
+- DPU OVS-DOCA: 3.2.1005, DB schema 8.5.1
+- DPU DOCA libraries: 3.2.1025-1
+- **FRR 8.4.4 installed on each DPU** for HBN-underlay validation (eBGP on `p1` to leaf — does **not** participate in bench data path; see [§ 2.4](#24-what-was-held-constant-between-arms) "fabric state additions between runs")
 - Bench tools: iperf3 3.16, netperf 2.7.1, sockperf 3.10, sysstat (mpstat) 12.6.x — all installed inside the pod via the Ubuntu universe repo
 
 ### 2.3 Topology
 
-Both clusters use the **same physical hardware**. Only the cluster profile differs:
+Both clusters use the **same physical hardware**. Only the cluster profile and where the dataplane runs differ. In every arm the bench traffic crosses the **40 G fabric** between gpu1 and gpu2; what changes is **whose CPU does encapsulation / decapsulation / conntrack / forwarding**.
 
+```mermaid
+flowchart TB
+  subgraph A["Test Set 1 — baseline (Cilium passthrough)"]
+    direction TB
+    A_Pod1["Pod on gpu1<br/>host k8s, Cilium-managed eth0<br/>100.64.0.83"]
+    A_Cil1["Cilium eBPF dataplane<br/>(host kernel softirq)<br/>encap + conntrack + route"]
+    A_HNIC1["host enp14s0f0np0<br/>40 GbE NIC"]
+    A_DPU1["gpu1 DPU (PASSTHROUGH MODE)<br/>br-sfc OpenFlow chain<br/>p0 ↔ pf0hpf learn rules<br/>(DPU is a wire)"]
+    A_P0_1["DPU p0<br/>40 GbE physical port"]
+    A_Fabric{{"custeng.leaf1.1<br/>Eth1/23 ↔ Eth1/25<br/>VLAN 497"}}
+    A_P0_2["DPU p0"]
+    A_DPU2["gpu2 DPU (passthrough)"]
+    A_HNIC2["host enp14s0f0np0"]
+    A_Cil2["Cilium eBPF<br/>(host kernel)"]
+    A_Pod2["Pod on gpu2<br/>host k8s<br/>100.64.1.224"]
+
+    A_Pod1 --> A_Cil1 --> A_HNIC1 --> A_DPU1 --> A_P0_1 --> A_Fabric --> A_P0_2 --> A_DPU2 --> A_HNIC2 --> A_Cil2 --> A_Pod2
+  end
+
+  subgraph B["Test Set 1 cluster B / Test Set 2 — VPC-OVN on DPU"]
+    direction TB
+    B_Pod1["Pod on gpu1 DPU<br/>tenant k8s, Multus net1<br/>10.100.0.4"]
+    B_SF1["SF representor en3f0pf0sfN<br/>(iface-id ↔ OVN logical port)"]
+    B_BRINT1{"br-int (datapath_type=netdev)<br/>★ hw-offload variable ★<br/>true → ConnectX-7 ASIC eswitch<br/>false → DPDK PMD on Arm core"}
+    B_BRX1["br-ovn-ext<br/>ovnvtep 172.16.97.98/27<br/>geneve encap"]
+    B_BRSFC1["br-sfc (DPDK)"]
+    B_P0_1["DPU p0<br/>40 GbE"]
+    B_HNIC1["host enp14s0f0np0<br/>(transparent passthrough)"]
+    B_Fabric{{"custeng.leaf1.1<br/>Eth1/23 ↔ Eth1/25<br/>VLAN 497"}}
+    B_HNIC2["host enp14s0f0np0"]
+    B_P0_2["DPU p0"]
+    B_BRSFC2["br-sfc"]
+    B_BRX2["br-ovn-ext<br/>ovnvtep 172.16.97.102/27<br/>geneve decap"]
+    B_BRINT2["br-int"]
+    B_SF2["SF representor"]
+    B_Pod2["Pod on gpu2 DPU<br/>10.100.0.19"]
+
+    B_Pod1 --> B_SF1 --> B_BRINT1 -->|geneve encap| B_BRX1 -->|patch| B_BRSFC1 --> B_P0_1 --> B_HNIC1 --> B_Fabric --> B_HNIC2 --> B_P0_2 --> B_BRSFC2 -->|patch| B_BRX2 -->|geneve decap| B_BRINT2 --> B_SF2 --> B_Pod2
+  end
+
+  classDef host fill:#e0e8ff,stroke:#446
+  classDef dpu fill:#e0f7e0,stroke:#080
+  classDef variable fill:#fffbe6,stroke:#bb8800,stroke-width:2px
+  classDef wire fill:#f0e0ff,stroke:#604
+  class A_Cil1,A_Cil2,A_HNIC1,A_HNIC2,A_Pod1,A_Pod2 host
+  class A_DPU1,A_DPU2,A_P0_1,A_P0_2,B_SF1,B_SF2,B_BRX1,B_BRX2,B_BRSFC1,B_BRSFC2,B_P0_1,B_P0_2 dpu
+  class B_BRINT1 variable
+  class A_Fabric,B_Fabric wire
 ```
-A (passthrough)                    B (VPC-OVN accelerated)
-─────────────                     ─────────────────────────
-host pod ─ flannel ─ kernel        host pod ─ flannel ─ kernel
-    │        OVN-host             OVN traffic ↓
-    └───── PCIe ─ DPU (wire) ─ p0          on the DPU
-                                  pod (in tenant cluster)
-                                       └── SF (en3f0pf0sfX) ─┐
-                                                              │
-                                              br-int (OVS-DOCA, HW offload)
-                                                              │
-                                              geneve  ── p0 ── 40 G fabric
-```
 
-In both arms the wire is the same; **what changes is whose CPU encapsulates / decapsulates / conntracks**.
+**Test Set 1 (A vs B)** changes where the dataplane lives — host kernel Cilium-eBPF vs DPU OVS-DOCA. **Test Set 2 (B-hw-off vs B-hw-on)** is the highlighted yellow `br-int` block in arm B: same path top-to-bottom, only `other_config:hw-offload` toggled.
 
-### 2.4 What was held constant between A and B
+### 2.4 What was held constant between arms
+
+#### Across both test sets (constant in every run, every arm)
 
 | Item | Held constant |
 |---|---|
 | Hardware (servers, DPUs, fabric switch, cables) | ✓ |
-| K8s version, container runtime | ✓ |
-| Fabric L2 / VLAN 497 / MTU 9216 | ✓ |
-| Pod resource requests, image, container CPU pinning | ✓ |
+| Host BIOS, microcode, kernel, sysctls — no perf tuning applied | ✓ |
+| Fabric L2 / VLAN 497 / MTU 9216 on `Eth1/23` (gpu1.p0) and `Eth1/25` (gpu2.p0) | ✓ |
+| Cable type (QSFP-H40G-AOC15M, 40 Gb/s) | ✓ |
+| DPU firmware (NIC FW 32.47.1088, UEFI 14.40.0010), DOCA Ubuntu 24.04, OVS-DOCA 3.2.1005 | ✓ |
 | Benchmark commands & parameters (verbatim from runner script) | ✓ |
 | Run count (5), warmup discard (run 1), inter-run idle (30 s) | ✓ |
+| Bench tool versions (iperf3 3.16, netperf 2.7.1, sockperf 3.10, mpstat 12.6) | ✓ |
 
-The **only** intentional difference: cluster profile (`dpf-ovn-baseline` vs `dpf-ovn-accelerated`).
+#### Test Set 1 (Cilium baseline ↔ VPC-OVN HW)
+
+| Item | Test Set 1 cluster A | Test Set 1 cluster B |
+|---|---|---|
+| Cluster profile | `dpf-ovn-baseline` (Passthrough) | `dpf-ovn-accelerated` (VPC-OVN) |
+| Pod CNI | Cilium eBPF on host kernel | Flannel + VPC-OVN as Multus secondary |
+| Pod CIDR | `100.64.0.0/16` (Cilium) | `10.100.0.0/24` (VPC-OVN via nv-ipam) |
+| Where the pods run | host k8s cluster | DPU tenant k8s cluster (kamaji) |
+| Where the dataplane runs | host kernel softirq | DPU OVS-DOCA, HW-offloaded into ConnectX-7 |
+| DPU operating mode | passthrough (p0↔pf0hpf learn chain only) | VPC-OVN (br-int, br-ovn-ext, br-sfc all active) |
+
+#### Test Set 2 (VPC-OVN sw ↔ VPC-OVN HW — apples-to-apples)
+
+| Item | Test Set 2 baseline | Test Set 2 accelerated |
+|---|---|---|
+| Cluster | same `dpf-ovn-accelerated` | same |
+| Pod spec, image, MAC, IP | same `bench-client-vpc` (10.100.0.4) ↔ `bench-server-vpc` (10.100.0.19) | same |
+| DPU OVS bridges, OVN logical switch, geneve tunnel endpoints | same | same |
+| SF representor that each pod attaches to | same `en3f0pf0sfN` per DPU | same |
+| `Eth1/23 ↔ Eth1/25` VLAN 497 path | same | same |
+| **OVS `other_config:hw-offload`** | **`false`** | **`true`** |
+
+In Test Set 2, only one Open_vSwitch column changes. No pod recreation, no NAD change, no DPU reboot, no firmware change, no cluster redeploy.
+
+#### Fabric state additions between runs (not on the bench data path)
+
+These switch ports and DPU interfaces were configured **between** Test Set 1 and Test Set 2 to prepare for HBN testing (TC3/TC4 — see § 7). They do **not** affect the benchmark numbers because the bench traffic continues to ride only the `Eth1/23 ↔ Eth1/25` VLAN 497 path on each DPU's `p0`.
+
+| Added item | Where | Purpose | Used by bench traffic? |
+|---|---|---|---|
+| `Eth1/24` routed `/31` (`172.16.97.248/31` ↔ gpu1.p1 `172.16.97.249/31`) on the leaf | `custeng.leaf1.1` | HBN underlay path #1 for gpu1 | **No** — separate from VPC-OVN's VLAN 497 path |
+| `Eth1/26` routed `/31` (`172.16.97.250/31` ↔ gpu2.p1 `172.16.97.251/31`) | `custeng.leaf1.1` | HBN underlay path #1 for gpu2 | **No** |
+| eBGP on each DPU's `p1` (FRR 8.4.4, AS 65010 gpu1 / AS 65020 gpu2 ↔ leaf AS 65001) | gpu1/gpu2 DPU OS | Validate fabric end-to-end for HBN deploy | **No** — only carries 123 prefixes from leaf and the test loopback `11.0.0.111/32` |
+| Hugepages `vm.nr_hugepages=4` (4 × 512 MB = 2 GB) on each DPU | DPU OS | Required for OVS-DOCA / DPDK to start | Yes — applied at setup, identical in both Test Set 2 arms |
+
+**Net effect on the benchmark:** the bench data path is `pod → SF → br-int → br-ovn-ext (ovnvtep .98/.102) → geneve → br-sfc → p0 → Eth1/23 ↔ Eth1/25 → mirror on the other side`. None of the new `p1` / `/31` / BGP state participates in that path. The DPU still has its full attention on the VPC-OVN dataplane during the run; FRR is a small userspace process with negligible CPU.
 
 ---
 
@@ -354,12 +468,13 @@ Plus the qualitative TC3 checks: BGP session established (`birdc show protocols`
 
 ## 8. Limitations and Caveats
 
-1. **Reference R (host PF↔host PF) is incomplete.** The "fabric ceiling" with no overlay was partially measured in `results/host-pf-reference-incomplete/` but only 75/110 files were captured before the original L2-bridging issue (since fixed for `p0`) blocked further runs. R bounds the discussion (B can't exceed R) but is not the comparison itself; the A vs B story stands.
-2. **n=4** per cluster (runs 2–5; run 1 discarded as warmup per the test plan). Stdev is reported alongside the mean. For most metrics the deltas (+30 % to +290 %) are far larger than within-arm variance.
-3. **Single-flow UDP loss is iperf3-bound, not network-bound.** The receiver's iperf3 process is the bottleneck; the same loss percentage appears in both arms because the bottleneck is identical in both. Multi-flow UDP would behave differently.
-4. **Pods run on the DPU tenant cluster, not on the host cluster.** This was a forced choice — the host cluster runs Cilium and has no DPF acceleration path. Running the bench pods on the DPU tenant cluster keeps the dataplane on the DPU's br-int, which is the path under test. CPU costs reported are host-side (gpu1 and gpu2 hosts via the persistent `mpstat` slicer), not DPU-side, so the "host CPU saved" metric is the right one.
-5. **Plumbing for VPC-OVN pod attachment was manual** (steps 6 & 7 in § 3.3). DPF v25.10.1's `vpc-ovn-node` agent only auto-binds OVS ports for pods with `ServiceInterface` CRs, not raw NAD-annotated pods. For production use the operator-managed flow should be used.
-6. **HBN ECMP scaling can't be demonstrated yet** because both DPU `p1` switchports are not in any forwarding domain — see [`FABRIC_HBN_ECMP_REQUEST.md`](FABRIC_HBN_ECMP_REQUEST.md).
+1. **n=4** per arm (runs 2–5; run 1 discarded as warmup per the test plan). Stdev is reported alongside the mean. For most metrics the deltas (+30 % to +290 %) are far larger than within-arm variance.
+2. **Single-flow UDP loss is iperf3-bound, not network-bound.** The receiver's iperf3 process is the bottleneck; the same loss percentage appears in every arm because the bottleneck is identical. Multi-flow UDP with RSS would behave differently.
+3. **Pods run on the DPU tenant cluster, not on the host cluster.** This was a forced choice — the host cluster runs Cilium and has no DPF acceleration path. Running the bench pods on the DPU tenant cluster keeps the dataplane on the DPU's br-int, which is the path under test. CPU costs reported are host-side (gpu1 and gpu2 hosts via the persistent `mpstat` slicer), not DPU-side, so the "host CPU saved" metric is the right one.
+4. **Plumbing for VPC-OVN pod attachment was manual** (steps 6 & 7 in § 3.3). DPF v25.10.1's `vpc-ovn-node` agent only auto-binds OVS ports for pods with `ServiceInterface` CRs, not raw NAD-annotated pods. For production use the operator-managed flow should be used.
+5. **HBN ECMP scaling can't be demonstrated yet — but the underlay is partially ready.** The first fabric ask (Eth1/24/26 routed /31s, BGP eBGP) is complete and validated end-to-end (BGP Established, 123 prefixes received per DPU, leaf loopback `11.0.0.111/32` reachable). The second fabric ask (additional BGP peering via VLAN 497's SVI so each DPU sees two equal-cost next-hops) is open with the network team — see [§ 7](#7-hbn-readiness--test-cases-3--4) and [`FABRIC_HBN_SECOND_PEERING_REQUEST.md`](FABRIC_HBN_SECOND_PEERING_REQUEST.md). Without the second path, BGP installs only one next-hop and the TC4 scaling sweep would read flat.
+6. **Host PCIe link to BF3 is Gen3 x16 (8 GT/s), not Gen5.** The Supermicro X10 host pre-dates BF3 by ~5 years and its root complex tops out at PCIe Gen3. Theoretical PCIe bandwidth ~16 GB/s is well above the 40 GbE fabric requirement (~5 GB/s), so this does not bottleneck the test — but a newer host platform would enable Gen5 link-up. Worth recording for clients evaluating BF3 on newer hosts.
+7. **The 40 GbE fabric speed is a switchport config choice, not a BF3 limit.** BF3 supports 200 GbE per port; the switch (Cisco Nexus, NX-OS 9.3, QSFP-H40G-AOC15M cables) is configured at 40 Gb/s. Numbers reported are at fabric line rate **as configured in this lab**, not at BF3's silicon ceiling.
 
 ---
 
@@ -373,9 +488,18 @@ DPF v25.10.1 VPC-OVN acceleration **delivers measurable, reproducible improvemen
 - **Throughput at the 40 Gb/s fabric line rate is identical** in both arms (39.4 Gbps with 8+ streams) — the wire is the limit; the win shows up in the CPU-busy column.
 - **Single-stream TCP gains 33 %**, **UDP send rate gains 160 %** — TX-side offload is real.
 
+The apples-to-apples Test Set 2 (same CNI, same cluster, hw-offload toggle) further confirms that **~half of those wins are silicon offload specifically** (the ConnectX-7 eswitch doing the per-packet work) and the other half comes from moving the dataplane to the DPU (OVS-DOCA on Arm cores still beats Cilium-on-host on transaction-heavy workloads).
+
 For the customer-facing positioning ("the DPU pays for itself by freeing host cores while delivering better latency and connection scaling"), the data in this report supports it without qualification.
 
-The HBN/ECMP test (§ 7) will add a second value-prop — multi-uplink aggregate bandwidth — but is gated on a one-time fabric reconfiguration on `custeng.leaf1.1`. Once that's done, the existing test infrastructure (scripts, OVN/NAD setup, runner) reuses cleanly for the third cluster.
+### What's next: HBN/ECMP
+
+The HBN/ECMP test (§ 7) adds a second value-prop — **multi-uplink aggregate bandwidth via BGP ECMP**. The fabric is **partially ready**:
+
+- ✅ The first fabric ask (Eth1/24/26 routed /31s, eBGP on each DPU's `p1`) is complete and validated. BGP is Established between each DPU and the leaf, 123 prefixes are propagating, and the leaf loopback `11.0.0.111/32` is reachable from each DPU at ~0.5 ms RTT.
+- 🟡 The second fabric ask (a second BGP peering per DPU via VLAN 497's SVI, so the routing table sees two equal-cost next-hops) is open with the network team. Documented in [`FABRIC_HBN_SECOND_PEERING_REQUEST.md`](FABRIC_HBN_SECOND_PEERING_REQUEST.md). Without it, BGP installs only one path and the TC4 scaling sweep would be flat.
+
+Once the second peering lands, the existing test infrastructure (scripts, OVN/NAD setup, runner) reuses cleanly for the `dpf-ovn-hbn` cluster — estimated ~3 hours wall clock to complete TC3 + TC4 + the ECMP scaling sweep.
 
 ---
 
@@ -383,16 +507,24 @@ The HBN/ECMP test (§ 7) will add a second value-prop — multi-uplink aggregate
 
 ```
 results/
-├── dpf-ovn-baseline/                 110 result files + run.log (passthrough, n=5 per test)
-├── dpf-ovn-accelerated/              220 result files + run.log + host-mpstat slices (VPC-OVN)
-├── host-pf-reference-incomplete/     partial (R baseline, fabric-blocked)
-└── charts/                           generated PNGs (this report)
+├── dpf-ovn-baseline/                       Test Set 1 baseline — Cilium passthrough (n=4)
+├── dpf-ovn-accelerated/                    Test Set 1 cluster B + Test Set 2 accelerated arm (n=4)
+├── dpf-ovn-accelerated-no-offload/         Test Set 2 baseline — VPC-OVN sw, hw-offload=false (n=4)
+└── charts/                                 generated PNGs (this report, 3-way comparisons)
 
 scripts/
-├── run_pod_baseline.sh               passthrough runner
-├── run_pod_accelerated.sh            VPC-OVN runner
-├── slice_host_mpstat.sh              cuts persistent mpstat into per-test windows
-└── make_charts.py                    generates the charts in this report
+├── run_pod_baseline.sh                     Test Set 1 cluster A runner
+├── run_pod_accelerated.sh                  Test Set 1 cluster B + Test Set 2 accelerated runner
+├── run_pod_accelerated_no_offload.sh       Test Set 2 baseline (hw-offload=false) runner
+├── slice_host_mpstat.sh                    cuts persistent host mpstat into per-test windows
+└── make_charts.py                          generates the 3-way charts
+
+Other reports / asks:
+├── STACK_EXPLANATION.md                    Full stack details (HW + SW + tunables + glue + data flow)
+├── FABRIC_HBN_ECMP_REQUEST.md              First fabric ask — COMPLETED (Eth1/24/26 routed /31s)
+├── FABRIC_HBN_SECOND_PEERING_REQUEST.md    Open follow-up ask (second BGP path per DPU via VLAN 497 SVI)
+├── POD_TO_POD_TEST_PLAN.md                 Original test plan
+└── TEST_CASES.md                           Higher-level TC1-TC4 scope (TC3/4 = HBN, pending)
 ```
 
 ## Appendix B — Reproducing the Comparison
