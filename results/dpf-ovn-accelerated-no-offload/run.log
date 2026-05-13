@@ -1,0 +1,71 @@
+[11:33:29] Bench pod net1 IPs: client=10.100.0.4 server=10.100.0.19
+[11:33:29] ping check
+[11:33:31]   ✓ pod→pod reachable on VPC-OVN
+[11:33:31] Cleaning prior servers
+[11:33:34] Starting servers (bound to 10.100.0.19)
+[11:33:40] Servers running
+[11:33:40] ===== Pod-to-pod VPC-OVN benchmark matrix (5 runs × 60s, ~80 min) =====
+[11:33:40] === Round 1 / 5 ===
+[11:33:40]   ▶ iperf3-tcp-1stream run1
+[11:35:11]   ▶ iperf3-tcp-8stream run1
+[11:36:42]   ▶ iperf3-tcp-16stream run1
+[11:38:13]   ▶ iperf3-udp-max run1
+[11:39:44]   ▶ iperf3-udp-64b run1
+[11:41:15]   ▶ iperf3-udp-1400b run1
+[11:42:46]   ▶ netperf-tcp-rr run1
+[11:44:17]   ▶ netperf-udp-rr run1
+[11:45:48]   ▶ netperf-tcp-stream-1b run1
+[11:47:19]   ▶ sockperf-pingpong run1
+[11:48:53]   ▶ netperf-tcp-crr run1
+[11:50:28] === Round 2 / 5 ===
+[11:50:28]   ▶ iperf3-tcp-1stream run2
+[11:51:59]   ▶ iperf3-tcp-8stream run2
+[11:53:30]   ▶ iperf3-tcp-16stream run2
+[11:55:01]   ▶ iperf3-udp-max run2
+[11:56:32]   ▶ iperf3-udp-64b run2
+[11:58:03]   ▶ iperf3-udp-1400b run2
+[11:59:35]   ▶ netperf-tcp-rr run2
+[12:01:06]   ▶ netperf-udp-rr run2
+[12:02:37]   ▶ netperf-tcp-stream-1b run2
+[12:04:08]   ▶ sockperf-pingpong run2
+[12:05:41]   ▶ netperf-tcp-crr run2
+[12:07:16] === Round 3 / 5 ===
+[12:07:16]   ▶ iperf3-tcp-1stream run3
+[12:08:48]   ▶ iperf3-tcp-8stream run3
+[12:10:19]   ▶ iperf3-tcp-16stream run3
+[12:11:50]   ▶ iperf3-udp-max run3
+[12:13:21]   ▶ iperf3-udp-64b run3
+[12:14:52]   ▶ iperf3-udp-1400b run3
+[12:16:23]   ▶ netperf-tcp-rr run3
+[12:17:54]   ▶ netperf-udp-rr run3
+[12:19:25]   ▶ netperf-tcp-stream-1b run3
+[12:20:56]   ▶ sockperf-pingpong run3
+[12:22:30]   ▶ netperf-tcp-crr run3
+[12:24:05] === Round 4 / 5 ===
+[12:24:05]   ▶ iperf3-tcp-1stream run4
+[12:25:36]   ▶ iperf3-tcp-8stream run4
+[12:27:07]   ▶ iperf3-tcp-16stream run4
+[12:28:38]   ▶ iperf3-udp-max run4
+[12:30:09]   ▶ iperf3-udp-64b run4
+[12:31:40]   ▶ iperf3-udp-1400b run4
+[12:33:11]   ▶ netperf-tcp-rr run4
+[12:34:42]   ▶ netperf-udp-rr run4
+[12:36:14]   ▶ netperf-tcp-stream-1b run4
+[12:37:45]   ▶ sockperf-pingpong run4
+[12:39:18]   ▶ netperf-tcp-crr run4
+[12:40:53] === Round 5 / 5 ===
+[12:40:53]   ▶ iperf3-tcp-1stream run5
+[12:42:24]   ▶ iperf3-tcp-8stream run5
+[12:43:55]   ▶ iperf3-tcp-16stream run5
+[12:45:27]   ▶ iperf3-udp-max run5
+[12:46:58]   ▶ iperf3-udp-64b run5
+[12:48:29]   ▶ iperf3-udp-1400b run5
+[12:50:00]   ▶ netperf-tcp-rr run5
+[12:51:31]   ▶ netperf-udp-rr run5
+[12:53:02]   ▶ netperf-tcp-stream-1b run5
+[12:54:33]   ▶ sockperf-pingpong run5
+[12:56:07]   ▶ netperf-tcp-crr run5
+[12:57:42] ===== Stopping servers =====
+[12:57:43] ===== DONE =====
+[12:57:43] Results in /home/ubuntu/dpf_testing_scenarios/results/dpf-ovn-accelerated-no-offload (file count: 111)
+[12:57:43] Results in /home/ubuntu/dpf_testing_scenarios/results/dpf-ovn-accelerated-no-offload (file count: 111)

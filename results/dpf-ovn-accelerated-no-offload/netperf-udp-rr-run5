@@ -1,0 +1,8 @@
+MIGRATED UDP REQUEST/RESPONSE TEST from 10.100.0.4 () port 0 AF_INET to 10.100.0.19 () port 0 AF_INET : demo : first burst 0
+Local /Remote
+Socket Size   Request  Resp.   Elapsed  Trans.
+Send   Recv   Size     Size    Time     Rate         
+bytes  Bytes  bytes    bytes   secs.    per sec   
+
+212992 212992 1        1       60.00    16690.42   
+212992 212992

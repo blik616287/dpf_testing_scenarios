@@ -1,0 +1,7 @@
+MIGRATED TCP STREAM TEST from 10.100.0.4 () port 0 AF_INET to 10.100.0.19 () port 0 AF_INET : demo
+Recv   Send    Send                          
+Socket Socket  Message  Elapsed              
+Size   Size    Size     Time     Throughput  
+bytes  bytes   bytes    secs.    10^6bits/sec  
+
+131072  16384      1    60.00      11.54   
