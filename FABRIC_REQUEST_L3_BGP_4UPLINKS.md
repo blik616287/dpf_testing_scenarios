@@ -119,7 +119,7 @@ config is worse than a clean numbered one.
             │             │                │              │
         gpu1 p0       gpu1 p1          gpu2 p0        gpu2 p1
         └──── gpu1 HBN ────┘            └──── gpu2 HBN ────┘
-           AS 65101, lo 11.0.0.1/32        AS 65201, lo 11.0.0.2/32
+           AS 65010, lo 11.0.0.1/32        AS 65020, lo 11.0.0.2/32
 
 ECMP: leaf reaches each DPU over 2 equal-cost eBGP paths; each DPU reaches
 the leaf (and the far DPU) over its own 2 uplinks. 4 eBGP sessions total.
@@ -137,11 +137,15 @@ no VLAN. Leaf port numbers are from prior fabric notes — **confirm with
 | Device | BGP AS | Loopback (router-id) |
 |---|---|---|
 | `custeng.leaf1.1` | **65001** | `11.0.0.101/32` |
-| gpu1 (HBN) | **65101** | `11.0.0.1/32` |
-| gpu2 (HBN) | **65201** | `11.0.0.2/32` |
+| gpu1 (HBN) | **65010** | `11.0.0.1/32` |
+| gpu2 (HBN) | **65020** | `11.0.0.2/32` |
 
-AS numbers mirror the NVIDIA reference ([R1],[R2]). **Confirm no collision with
-the existing fabric.**
+gpu1/gpu2 **keep the existing fabric ASNs 65010 / 65020** — already live on the
+leaf's `p1` BGP sessions, so the leaf needs **no ASN change**, only the new `p0`
+sessions added. The leaf keeps its current ASN (`65001` shown below is
+illustrative — substitute the real one). The NVIDIA reference's 65101/65201 are
+illustrative too; any per-DPU distinct private ASN works, so there is no reason
+to churn working ASNs. HBN is set to 65010/65020 in its DPUServiceConfiguration.
 
 ### 4.2 /31 transit links — **Route B (numbered) only**
 Route A (unnumbered) needs **no /31s** — links use IPv6 link-local only.
@@ -234,19 +238,19 @@ router bgp 65001
     network 11.0.0.101/32
 
   neighbor Ethernet1/23
-    remote-as 65101
+    remote-as 65010
     description gpu1-p0
     address-family ipv4 unicast
   neighbor Ethernet1/24
-    remote-as 65101
+    remote-as 65010
     description gpu1-p1
     address-family ipv4 unicast
   neighbor Ethernet1/25
-    remote-as 65201
+    remote-as 65020
     description gpu2-p0
     address-family ipv4 unicast
   neighbor Ethernet1/26
-    remote-as 65201
+    remote-as 65020
     description gpu2-p1
     address-family ipv4 unicast
 ```
@@ -294,16 +298,16 @@ router bgp 65001
     address-family ipv4 unicast
       send-community
       soft-reconfiguration inbound
-  neighbor 172.16.97.241 remote-as 65101
+  neighbor 172.16.97.241 remote-as 65010
     inherit peer HBN-DPU
     description gpu1-p0
-  neighbor 172.16.97.243 remote-as 65101
+  neighbor 172.16.97.243 remote-as 65010
     inherit peer HBN-DPU
     description gpu1-p1
-  neighbor 172.16.97.245 remote-as 65201
+  neighbor 172.16.97.245 remote-as 65020
     inherit peer HBN-DPU
     description gpu2-p0
-  neighbor 172.16.97.247 remote-as 65201
+  neighbor 172.16.97.247 remote-as 65020
     inherit peer HBN-DPU
     description gpu2-p1
 ```
@@ -335,7 +339,7 @@ HBN's `startupYAMLJ2` ([R1]/[R3]) is set to match the chosen route:
 - **Route A (unnumbered)** — verbatim to the reference:
   ```yaml
   interface: { p0_if: {type: swp}, p1_if: {type: swp}, lo: {type: loopback, ip: {address: {11.0.0.1/32: {}}}} }
-  router: { bgp: { autonomous-system: 65101, router-id: 11.0.0.1 } }
+  router: { bgp: { autonomous-system: 65010, router-id: 11.0.0.1 } }
   vrf: { default: { router: { bgp: {
     neighbor: { p0_if: {peer-group: hbn, type: unnumbered}, p1_if: {peer-group: hbn, type: unnumbered} },
     peer-group: { hbn: {remote-as: external} },
@@ -431,7 +435,9 @@ p1 (Eth1/24, Eth1/26) returns to its pre-change state. TCAM `ing-sup` carving
    nothing else; whether the `Vlan497` SVI should be retained.
 4. **TCAM reload (Route A)** — schedule the `ing-sup` re-carve + reload window.
 5. **RFC 5549 hardware support (Route A)** — confirm for this Nexus model [R6].
-6. **AS numbers** — 65001 / 65101 / 65201 free of conflict with existing fabric.
+6. **AS numbers** — leaf keeps its existing ASN; gpu1/gpu2 keep the existing
+   fabric ASNs **65010 / 65020** (already live on the `p1` sessions). Confirm no
+   collision.
 7. **IP block (Route B only)** — `172.16.97.240/29` free for the four /31s.
 8. **Jumbo MTU** — confirm `mtu 9216` applies on routed Eth1/23 & 1/25 (1/24 &
    1/26 already 9216), or apply the platform jumbo policy first.
