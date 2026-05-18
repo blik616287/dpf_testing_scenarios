@@ -1,0 +1,39 @@
+Connecting to host 10.100.0.19, port 5201
+[  5] local 10.100.0.4 port 56430 connected to 10.100.0.19 port 5201
+[ ID] Interval           Transfer     Bitrate         Total Datagrams
+[  5]   0.00-1.00   sec   577 MBytes  4.83 Gbits/sec  417750  
+[  5]   1.00-2.00   sec   577 MBytes  4.84 Gbits/sec  417792  
+[  5]   2.00-3.00   sec   576 MBytes  4.83 Gbits/sec  417068  
+[  5]   3.00-4.00   sec   576 MBytes  4.83 Gbits/sec  417236  
+[  5]   4.00-5.00   sec   576 MBytes  4.84 Gbits/sec  417465  
+[  5]   5.00-6.00   sec   576 MBytes  4.83 Gbits/sec  417090  
+[  5]   6.00-7.00   sec   570 MBytes  4.78 Gbits/sec  412590  
+[  5]   7.00-8.00   sec   566 MBytes  4.75 Gbits/sec  409968  
+[  5]   8.00-9.00   sec   565 MBytes  4.73 Gbits/sec  408849  
+[  5]   9.00-10.00  sec   567 MBytes  4.75 Gbits/sec  410445  
+[  5]  10.00-11.00  sec   568 MBytes  4.76 Gbits/sec  411125  
+[  5]  11.00-12.00  sec   567 MBytes  4.76 Gbits/sec  410862  
+[  5]  12.00-13.00  sec   567 MBytes  4.76 Gbits/sec  410648  
+[  5]  13.00-14.00  sec   568 MBytes  4.76 Gbits/sec  411039  
+[  5]  14.00-15.00  sec   567 MBytes  4.75 Gbits/sec  410334  
+[  5]  15.00-16.00  sec   567 MBytes  4.76 Gbits/sec  410570  
+[  5]  16.00-17.00  sec   567 MBytes  4.76 Gbits/sec  410785  
+[  5]  17.00-18.00  sec   567 MBytes  4.76 Gbits/sec  410798  
+[  5]  18.00-19.00  sec   566 MBytes  4.75 Gbits/sec  409804  
+[  5]  19.00-20.00  sec   566 MBytes  4.75 Gbits/sec  409950  
+[  5]  20.00-21.00  sec   567 MBytes  4.76 Gbits/sec  410862  
+[  5]  21.00-22.00  sec   572 MBytes  4.80 Gbits/sec  414229  
+[  5]  22.00-23.00  sec   576 MBytes  4.83 Gbits/sec  416938  
+[  5]  23.00-24.00  sec   577 MBytes  4.84 Gbits/sec  418102  
+[  5]  24.00-25.00  sec   579 MBytes  4.86 Gbits/sec  419137  
+[  5]  25.00-26.00  sec   579 MBytes  4.86 Gbits/sec  419123  
+[  5]  26.00-27.00  sec   578 MBytes  4.85 Gbits/sec  418442  
+[  5]  27.00-28.00  sec   577 MBytes  4.84 Gbits/sec  417854  
+[  5]  28.00-29.00  sec   577 MBytes  4.84 Gbits/sec  418126  
+[  5]  29.00-30.00  sec   578 MBytes  4.85 Gbits/sec  418459  
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams
+[  5]   0.00-30.00  sec  16.8 GBytes  4.80 Gbits/sec  0.000 ms  0/12423440 (0%)  sender
+[  5]   0.00-29.99  sec  16.8 GBytes  4.80 Gbits/sec  0.001 ms  0/12423440 (0%)  receiver
+
+iperf Done.

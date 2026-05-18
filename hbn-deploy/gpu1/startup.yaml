@@ -1,0 +1,132 @@
+- header:
+    model: bluefield
+    nvue-api-version: nvue_v1
+    rev-id: 1.0
+    version: HBN 2.4.0
+
+- set:
+    interface:
+      lo:
+        type: loopback
+        ip:
+          address:
+            10.99.99.1/32: {}
+
+      p0_if:
+        type: swp
+        link:
+          mtu: 9216
+        ip:
+          address:
+            172.16.97.98/27: {}
+
+      p1_if:
+        type: swp
+        link:
+          mtu: 9216
+        ip:
+          address:
+            172.16.97.249/31: {}
+
+      pf0hpf_if:
+        type: swp
+        link:
+          mtu: 9216
+        bridge:
+          domain:
+            br_default:
+              access: 11
+
+      vlan11:
+        type: svi
+        vlan: 11
+        ip:
+          vrf: RED
+          address:
+            10.10.11.1/24: {}
+
+    bridge:
+      domain:
+        br_default:
+          vlan:
+            "11":
+              vni:
+                "10010": {}
+
+    nve:
+      vxlan:
+        enable: on
+        arp-nd-suppress: on
+        mac-learning: off
+        source:
+          address: 10.99.99.1
+
+    evpn:
+      enable: on
+      route-advertise: {}
+
+    router:
+      bgp:
+        enable: on
+        graceful-restart:
+          mode: full
+
+    vrf:
+      default:
+        router:
+          bgp:
+            enable: on
+            autonomous-system: 65010
+            router-id: 10.99.99.1
+            address-family:
+              ipv4-unicast:
+                enable: on
+                redistribute:
+                  connected:
+                    enable: on
+              l2vpn-evpn:
+                enable: on
+            path-selection:
+              multipath:
+                aspath-ignore: on
+            neighbor:
+              172.16.97.248:
+                remote-as: 65001
+                type: numbered
+                address-family:
+                  ipv4-unicast:
+                    enable: on
+                  l2vpn-evpn:
+                    enable: on
+              172.16.97.125:
+                remote-as: 65001
+                type: numbered
+                address-family:
+                  ipv4-unicast:
+                    enable: on
+                  l2vpn-evpn:
+                    enable: on
+
+      RED:
+        evpn:
+          enable: on
+          vni:
+            "100001": {}
+        loopback:
+          ip:
+            address:
+              10.99.99.1/32: {}
+        router:
+          bgp:
+            enable: on
+            autonomous-system: 65010
+            router-id: 10.99.99.1
+            address-family:
+              ipv4-unicast:
+                enable: on
+                redistribute:
+                  connected:
+                    enable: on
+                route-export:
+                  to-evpn:
+                    enable: on

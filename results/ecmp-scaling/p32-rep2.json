@@ -1,0 +1,11 @@
+{
+	"start":	{
+		"connected":	[],
+		"version":	"iperf 3.16",
+		"system_info":	"Linux edge-7bf6f060000000000000ac1f6b24deb2-mt24326005fn 6.8.0-1013-bluefield-64k #17-Ubuntu SMP PREEMPT_DYNAMIC Wed Nov  5 22:26:14 UTC 2025 aarch64"
+	},
+	"intervals":	[],
+	"end":	{
+	},
+	"error":	"unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: Connection refused"
+}

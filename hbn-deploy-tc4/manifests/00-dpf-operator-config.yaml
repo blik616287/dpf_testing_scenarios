@@ -1,0 +1,44 @@
+---
+# PVC for BFB image storage (DPF Operator copies the BFB here, then DPUs pull via NFS)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bfb-pvc
+  namespace: dpf-operator-system
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+# DPFOperatorConfig — enables all DPF subsystem components.
+# Zero Trust mode: BFB push via DPU BMC Redfish.
+apiVersion: operator.dpu.nvidia.com/v1alpha1
+kind: DPFOperatorConfig
+metadata:
+  name: dpfoperatorconfig
+  namespace: dpf-operator-system
+spec:
+  provisioningController:
+    bfbPVCName: bfb-pvc
+    # Zero Trust: BFB pushed via DPU BMC Redfish endpoint
+    installInterface:
+      installViaRedfish:
+        bfbRegistry:
+          disable: false
+          port: 30080
+        bfbRegistryAddress: "172.16.30.90"
+    dmsTimeout: 900
+    maxDPUParallelInstallations: 2
+    maxUnavailableDPUNodes: 2
+  kamajiClusterManager: {}        # use defaults — Kamaji already installed
+  multus: {}                       # deploy multus on host nodes
+  nvipam: {}                       # deploy nvidia-k8s-ipam on host nodes
+  ovsCNI: {}                       # deploy ovs-cni on host nodes
+  serviceSetController: {}         # service-chain operator on host nodes
+  dpuServiceController: {}         # DPUService controller
+  dpuDetector: {}                  # detects DPU-equipped nodes via NFD
+  networking:
+    controlPlaneMTU: 1500
+    highSpeedMTU: 9000             # for p0/p1 wire-side jumbo support

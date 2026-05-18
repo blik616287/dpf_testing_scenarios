@@ -1,0 +1,267 @@
+# Phase A — Pre-deploy findings (non-destructive analysis)
+
+Output of inspecting the HBN cluster profile values (`/tmp/hbn-values.yaml`, 383 lines, pulled from Palette UID `698dd2dd4b0c719b6c763605`).
+
+**Status: PAUSED at the Phase A stop point.** Material incompatibilities and one IP-conflict discovered. The user needs to decide on three open questions before any teardown.
+
+---
+
+## A.1 What the HBN profile actually does
+
+The profile defines a single Helm chart `dpf-deployment` v25.10.1 that ships **everything in one bundle**:
+
+| Component | Source | Role |
+|---|---|---|
+| `bfb` URL | `bf-bundle-3.2.1-34_25.11_ubuntu-24.04_64k_prod.bfb` | BFB image fetched + pushed to DPU |
+| `dpuFlavors[hbn-v25.10.1]` | inline | Kernel cmdline, mlxconfig, OVS bring-up script — applied at BFB install |
+| `dpuServiceConfigurations[doca-hbn]` | inline | Per-DPU values + NVUE-format FRR config rendered via Jinja2 |
+| `dpuServiceTemplates[doca-hbn]` | `nvcr.io/nvidia/doca/doca_hbn:3.2.1-doca3.2.1` (chart v1.0.5) | The actual HBN container DaemonSet |
+| `dpuDeployments[hbn-only]` | inline | Wraps DPUServices + service chains |
+| `dpuServiceInterfaces` | inline | Defines `p0`, `p1`, `pf0hpf` ServiceInterfaces |
+| `dpuServiceIPAMs` | inline | `pool1` (172.16.97.0/24 /29 per DPU) + `loopback` (11.0.0.0/24 /32 per DPU) |
+| `dpuServiceChains` | inline | Wires p0/p1/pf0hpf physical → HBN container's `p0_if`/`p1_if`/`pf0hpf_if` |
+
+**Observation worth noting**: the per-DPU IPAM preallocations in the profile match **our specific DPUs by serial number**:
+```
+allocations:
+  dpu-node-mt2439600dak-mt2439600dak: 172.16.97.0/29   ← gpu2
+  dpu-node-mt24326005fn-mt24326005fn: 172.16.97.8/29   ← gpu1
+```
+So either this profile was given to us pre-customized for this lab, or someone with our DPU serials wrote it. Either way, those allocations are hard-coded.
+
+---
+
+## A.2 Critical findings (in order of severity)
+
+### A.2.1 🔴 HBN ECMP requires p0 to be routed too — we only have p1 routed
+
+The HBN profile's BGP config (lines 233-251) peers on **both** `p0_if` and `p1_if`. These map (via service chains) to the **physical** p0 and p1 ports. For BGP to Establish on each, the leaf-side port must be a routed L3 endpoint:
+
+| Switchport | Current config | What HBN needs |
+|---|---|---|
+| Eth1/23 (gpu1.p0) | `switchport access vlan 497` | **routed /31 with eBGP listener** |
+| Eth1/24 (gpu1.p1) | routed /31 ✅ (network team done) | already correct |
+| Eth1/25 (gpu2.p0) | `switchport access vlan 497` | **routed /31 with eBGP listener** |
+| Eth1/26 (gpu2.p1) | routed /31 ✅ | already correct |
+
+**Without this**: HBN deploys, but only `p1_if` BGP Establishes. `p0_if` BGP stays in Idle/Active. **Each DPU sees only 1 BGP path. TC4's ECMP scaling sweep reads flat.** That's the same dead-end we already documented for the "p1 in VLAN 497" alternative.
+
+**This is a third fabric ask.** We need network team to convert Eth1/23 and Eth1/25 from VLAN 497 access to routed /31s with BGP. That breaks VPC-OVN underlay if we ever want to come back to it, but since we already have all the Test Set 1 + Test Set 2 data saved, that's acceptable as a one-way migration.
+
+**Decision needed**: do we make this third fabric ask before tearing down VPC-OVN? Or do we deploy HBN with single-path BGP and accept that TC4 ECMP scaling won't demonstrate uplift?
+
+### A.2.2 🟠 HBN IPAM `pool1` (172.16.97.0/24 /29) conflicts with host PF IPs (172.16.97.10, .11)
+
+The HBN profile's IPAM pool `pool1` is set up to allocate `/29` subnets from `172.16.97.0/24` for the per-DPU `pf0hpf_red` SVI inside the HBN container.
+
+Per the hard-coded allocations:
+- gpu1 DPU `pf0hpf_red` SVI gets an IP in `172.16.97.8/29` (.8 - .15)
+- gpu2 DPU `pf0hpf_red` SVI gets an IP in `172.16.97.0/29` (.0 - .7)
+
+But our existing host PFs are configured at:
+- gpu1 host `enp14s0f0np0`: **172.16.97.10/24** (configured by `profile-addons-accelerated/12-fabric-host-config.yaml`)
+- gpu2 host `enp14s0f0np0`: **172.16.97.11/24**
+
+**.10 and .11 fall inside the gpu1 DPU's /29 (172.16.97.8/29).** If the host's static netplan keeps these IPs alive after the HBN cluster comes up, and HBN's pf0hpf SVI tries to use them, there's a duplicate-IP conflict.
+
+**Mitigations**:
+- (a) Drop the `12-fabric-host-config.yaml` manifest from the HBN cluster profile so the host PF doesn't get a static IP. Under HBN, the host's traffic egresses via pf0hpf into the HBN container, which routes it — the host PF doesn't need an IP. Recommended.
+- (b) Override `pool1` IPAM to use a different subnet entirely (e.g., `192.168.97.0/24`) and lose the convenience of having all underlay IPs in one /24.
+
+Recommendation: **(a) — drop the host-IP manifest from the cluster profile.**
+
+### A.2.3 🟠 Profile uses BGP unnumbered + EVPN; our fabric is numbered /31 + plain IPv4 unicast
+
+The HBN profile's `startupYAMLJ2` (lines 156-275) is NVUE-format FRR config that:
+1. Configures `p0_if` and `p1_if` as **swp interfaces with no IP** (BGP unnumbered, uses IPv6 link-local for transport)
+2. Enables `l2vpn-evpn` address-family on both the default VRF and per-tenant VRF
+3. Sets up VXLAN with the loopback IP as source
+4. Configures a VRF (RED) with VLAN-VNI mapping
+
+Our fabric:
+- Numbered /31 — each routed switchport on the leaf has a specific peer IP; HBN's unnumbered config won't match
+- Leaf BGP runs plain IPv4 unicast — `l2vpn-evpn` family isn't enabled on the leaf side
+
+**Two patches needed in our override**:
+1. **Rewrite `startupYAMLJ2`** to assign explicit IP addresses to p0_if and p1_if (matching the /31 the network team gave us per port), and use `neighbor <ip> remote-as <leaf-asn>` style numbered peers.
+2. **Decide on EVPN**: keep enabled (it'll work locally, the leaf just won't advertise EVPN routes back — probably benign) or strip the `l2vpn-evpn` blocks (cleaner config, less chance of HBN-internal dependency on EVPN). Recommendation: **keep EVPN on** initially; if HBN won't start, strip it.
+
+### A.2.4 🟡 ASN mismatch: profile defaults 65101/65102, our fabric expects 65010/65020
+
+Easy fix in `perDPUValuesYAML` — override `bgp_autonomous_system` per hostname. Already understood.
+
+### A.2.5 🟡 Loopback pool 11.0.0.0/24 — potential collision with leaf loopback 11.0.0.111
+
+HBN profile allocates DPU loopback IPs from `11.0.0.0/24`. The leaf's loopback that we've been BGP-advertising is `11.0.0.111/32`. nv-ipam will probably allocate from .1, .2, .3 first — unlikely to collide unless something forces .111. But it's a configured subnet collision and should be flagged.
+
+Recommendation: **override the loopback pool** to `11.1.0.0/24` (or any non-conflicting range) to be safe.
+
+---
+
+## A.3 Override values file — draft
+
+Constructed but **not yet saved as the actual override** because we need user decisions on §§ A.2.1 / A.2.3 first. Sketch:
+
+```yaml
+charts:
+  dpf-deployment:
+    dpuServiceConfigurations:
+      - name: doca-hbn
+        serviceConfiguration:
+          helmChart:
+            values:
+              configuration:
+                perDPUValuesYAML: |
+                  - hostnamePattern: "*"
+                    values:
+                      bgp_peer_group: hbn
+
+                  - hostnamePattern: "dpu-node-mt24326005fn-mt24326005fn*"
+                    values:
+                      role: RED
+                      vrf: RED
+                      vlan: 11
+                      l2vni: 10010
+                      l3vni: 100001
+                      bgp_autonomous_system: 65010              # was 65101
+                      # numbered-mode additions:
+                      p0_if_addr: "TBD-need-third-fabric-ask"   # e.g., 172.16.97.X/31
+                      p0_if_peer: "TBD"
+                      p1_if_addr: "172.16.97.249/31"
+                      p1_if_peer: "172.16.97.248"
+                      leaf_asn: 65001
+
+                  - hostnamePattern: "dpu-node-mt2439600dak-mt2439600dak*"
+                    values:
+                      role: RED
+                      vrf: RED
+                      vlan: 11
+                      l2vni: 10010
+                      l3vni: 100001
+                      bgp_autonomous_system: 65020              # was 65102
+                      p0_if_addr: "TBD"
+                      p0_if_peer: "TBD"
+                      p1_if_addr: "172.16.97.251/31"
+                      p1_if_peer: "172.16.97.250"
+                      leaf_asn: 65001
+
+                startupYAMLJ2: |
+                  # rewritten to:
+                  #   - put numbered IPs on p0_if / p1_if from per-DPU values
+                  #   - use neighbor <ip> remote-as 65001 instead of `unnumbered`
+                  #   - keep EVPN enabled locally (leaf won't advertise EVPN; should be benign)
+                  #   - keep VRF RED config for pf0hpf attachment
+                  # (full template TBD — needs the p0 IP plan from § A.2.1)
+
+    dpuServiceIPAMs:
+      - name: pool1
+        ipv4Network:
+          network: "192.168.97.0/24"     # was 172.16.97.0/24 — avoid collision with host PFs
+          gatewayIndex: 2
+          prefixSize: 29
+          allocations:
+            dpu-node-mt2439600dak-mt2439600dak: 192.168.97.0/29
+            dpu-node-mt24326005fn-mt24326005fn: 192.168.97.8/29
+      - name: loopback
+        ipv4Network:
+          network: "11.1.0.0/24"          # was 11.0.0.0/24 — avoid collision with leaf loopback
+          prefixSize: 32
+```
+
+---
+
+## A.4 Cluster profile clone-vs-override decision
+
+Same approach as our v2 VPC-OVN profile worked well: **clone the HBN profile in Palette via API, patch the cloned UID with the override values, then have `dpf_deploy.py` reference the cloned UID.**
+
+`scripts/dpf_deploy.py` already has the original `ADDON_HBN_UID = "698dd2dd4b0c719b6c763605"`. After clone-and-patch, we'd add `ADDON_HBN_V2_UID = "<new clone UID>"` and update `dpf-ovn-hbn`'s addon list.
+
+API steps (executable but **not run yet**):
+```bash
+# 1. POST clone request
+curl -X POST $API/clusterprofiles/$HBN_UID/clone -H "ApiKey: $KEY" ...
+
+# 2. PATCH the cloned profile's pack[0].values with the override yaml
+curl -X PUT $API/clusterprofiles/$NEW_UID/packs -H "ApiKey: $KEY" -d @hbn-v2-values.json
+
+# 3. Mark cloned profile published
+curl -X PATCH $API/clusterprofiles/$NEW_UID/publish ...
+```
+
+---
+
+## A.5 Snapshot of live VPC-OVN cluster — for rollback
+
+Not yet captured. To snapshot before any teardown, we would:
+
+```bash
+# Cluster UID
+python3 scripts/dpf_deploy.py list | grep dpf-ovn-accelerated
+VPC_UID=<from above>
+
+# Host cluster manifests
+ssh ubuntu@172.16.30.90 'sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get \
+  spectrocluster,dpudeployment,dpuservice,dpuvpc,dpuvirtualnetwork,ippool,networkattachmentdefinition \
+  -A -o yaml' > /tmp/snapshot-host-cluster.yaml
+
+# Bench pods + their network-status annotations (so we can recreate)
+ssh ubuntu@172.16.30.90 'sudo kubectl --kubeconfig=/tmp/tenant.kc get pods bench-client-vpc bench-server-vpc -o yaml' > /tmp/snapshot-bench-pods.yaml
+
+# OVN logical state (in case we need to recreate the LSPs identically)
+ssh ubuntu@172.16.30.90 'ovn-nbctl --db=tcp:172.16.30.90:30641 list logical_switch_port' > /tmp/snapshot-ovn-lsp.txt
+ssh ubuntu@172.16.30.90 'ovn-sbctl --db=tcp:172.16.30.90:30642 list chassis' > /tmp/snapshot-ovn-chassis.txt
+```
+
+These don't take any cluster offline — they're just `kubectl get` reads.
+
+---
+
+## A.6 Three decisions needed before Phase B teardown
+
+| # | Decision | Options |
+|---|---|---|
+| 1 | **p0 routed-interface fabric ask** | (a) Ask network team for a third change — convert Eth1/23 and Eth1/25 to routed /31s with BGP. Adds ~1 week if their queue is slow. <br>(b) Deploy HBN with single-path BGP only (p1 only). TC4 ECMP scaling will be flat — report it as "HBN deployed and BGP works on one uplink; cannot demonstrate multi-uplink ECMP without further fabric reconfig." Honest but unimpressive. |
+| 2 | **EVPN approach** | (a) Keep enabled locally; leaf won't advertise EVPN. Probably fine, may or may not work. <br>(b) Strip EVPN from startupYAMLJ2 entirely. Cleaner; HBN container has no EVPN code path. |
+| 3 | **IPAM conflict resolution** | (a) Drop `12-fabric-host-config.yaml` from the HBN cluster profile addon list so host PFs don't get static 172.16.97.10/.11 IPs. **Recommended.** <br>(b) Override pool1 to a non-conflicting subnet. Works but loses the "everything in 172.16.97/24" tidy underlay. |
+
+My recommendations:
+- 1: **(a) request the third fabric change** — without it, HBN's ECMP value-prop can't be demonstrated. Worth the wait. Meanwhile, leave VPC-OVN running (data already collected).
+- 2: **(a) keep EVPN on** — try first; if HBN container fails to start with no EVPN peer, fall back to stripping it.
+- 3: **(a) drop the host-IP manifest** from the HBN profile — cleanest fix, matches HBN's expected topology (host traffic flows via HBN, not directly via host PF).
+
+---
+
+## A.7 Recommended next step
+
+**Hold all teardown.** Before Phase B:
+
+1. Draft and send the third fabric request — `FABRIC_HBN_P0_ROUTED_REQUEST.md` — asking network team to convert Eth1/23 and Eth1/25 from VLAN 497 access to routed /31s. Once that lands, we have full 2-path-per-DPU L3 fabric, and HBN's ECMP scaling test will be meaningful.
+2. While waiting for the network team, finalize the helm override (`hbn-v2-values.yaml`) with the actual per-port IPs they assign.
+3. Clone-and-patch the HBN cluster profile in Palette to embed the override (~30 min once override is ready).
+4. Snapshot the live VPC-OVN cluster (~10 min, non-destructive).
+5. Then schedule the 6-8 hour Phase B-I window.
+
+If the third fabric ask is a deal-breaker (network team won't or can't), then the honest path is:
+- Keep the existing report (Test Set 1 + Test Set 2 are the strong story)
+- Document TC3/TC4 as "blocked on fabric topology" — not on our software readiness
+- Move on
+
+---
+
+## A.8 What's been done in this Phase A (non-destructive)
+
+| Step | Status |
+|---|---|
+| Pulled HBN profile spec from Palette | ✅ Done — saved to `/tmp/hbn-profile.json` |
+| Inspected full 383-line values yaml | ✅ Done — saved to `/tmp/hbn-values.yaml` |
+| Identified DPUFlavor delta (BFB-driven) | ✅ Documented in HBN_PROFILE_PLAN § 3.1 |
+| Identified BGP unnumbered vs numbered mismatch | ✅ See § A.2.3 above |
+| Identified ASN mismatch | ✅ Trivial override |
+| Identified IPAM conflict with host PFs | 🆕 **Discovered in Phase A** (not in original plan) |
+| Identified p0 routed-interface dependency for HBN ECMP | 🆕 **Discovered in Phase A** (not in original plan) |
+| Identified loopback pool potential collision | 🆕 **Discovered in Phase A** |
+| Drafted override values structure | ✅ Sketch in § A.3 (TBD fields for p0 awaiting fabric ask outcome) |
+| Snapshot of live VPC-OVN cluster | ⏸ Not yet — script ready in § A.5, run when ready |
+| Clone-and-patch of HBN profile in Palette | ⏸ Not yet — needs finalized override first |
+
+No destructive operations were performed. The live VPC-OVN cluster is untouched. All decisions are reversible.

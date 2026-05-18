@@ -1,0 +1,54 @@
+# OVN VPC service — DPUServiceTemplates (DPF v25.10.1)
+# charts: ovn-chart v25.10.1, dpf-vpc-ovn v25.10.1 from helm.ngc.nvidia.com/nvidia/doca
+---
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceTemplate
+metadata:
+  name: ovn-central
+  namespace: dpf-operator-system
+spec:
+  deploymentServiceName: ovn-central
+  helmChart:
+    source:
+      repoURL: https://helm.ngc.nvidia.com/nvidia/doca
+      chart: ovn-chart
+      version: v25.10.1
+---
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceTemplate
+metadata:
+  name: ovn-controller
+  namespace: dpf-operator-system
+spec:
+  deploymentServiceName: ovn-controller
+  helmChart:
+    source:
+      repoURL: https://helm.ngc.nvidia.com/nvidia/doca
+      chart: ovn-chart
+      version: v25.10.1
+---
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceTemplate
+metadata:
+  name: vpc-ovn-controller
+  namespace: dpf-operator-system
+spec:
+  deploymentServiceName: vpc-ovn-controller
+  helmChart:
+    source:
+      repoURL: https://helm.ngc.nvidia.com/nvidia/doca
+      chart: dpf-vpc-ovn
+      version: v25.10.1
+---
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceTemplate
+metadata:
+  name: vpc-ovn-node
+  namespace: dpf-operator-system
+spec:
+  deploymentServiceName: vpc-ovn-node
+  helmChart:
+    source:
+      repoURL: https://helm.ngc.nvidia.com/nvidia/doca
+      chart: dpf-vpc-ovn
+      version: v25.10.1

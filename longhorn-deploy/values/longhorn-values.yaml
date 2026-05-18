@@ -1,0 +1,34 @@
+# Longhorn values for the gpu1/gpu2 (2-node) cluster.
+# Cluster: kubeadm 1.33 + Cilium (kubeProxyReplacement, vxlan).
+# 2 nodes total → 2 replicas per volume by default.
+
+defaultSettings:
+  defaultDataPath: /var/lib/longhorn
+  # 2 nodes: tolerate same-node replica placement during failure recovery
+  replicaSoftAntiAffinity: true
+  storageMinimalAvailablePercentage: 10
+  # auto-create disks if missing
+  createDefaultDiskLabeledNodes: false
+
+persistence:
+  defaultClass: true
+  defaultClassReplicaCount: 2
+  defaultFsType: ext4
+  reclaimPolicy: Delete
+
+# Deploy CSI driver
+csi:
+  kubeletRootDir: /var/lib/kubelet
+
+# Disable Longhorn's bundled ingress UI (we'll use kubectl port-forward if needed)
+ingress:
+  enabled: false
+
+# Service for UI
+service:
+  ui:
+    type: ClusterIP
+
+# Make image-pull less chatty
+image:
+  pullPolicy: IfNotPresent

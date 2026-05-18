@@ -1,0 +1,39 @@
+Warning: Permanently added '172.16.30.29' (ED25519) to the list of known hosts.
+=== P=1 REP=1 ===
+P=1 rep=1 : 7.16 Gbps
+=== P=1 REP=2 ===
+P=1 rep=2 : 0.0 Gbps
+=== P=1 REP=3 ===
+P=1 rep=3 : 7.25 Gbps
+=== P=2 REP=1 ===
+P=2 rep=1 : 7.61 Gbps
+=== P=2 REP=2 ===
+P=2 rep=2 : 7.44 Gbps
+=== P=2 REP=3 ===
+P=2 rep=3 : 7.62 Gbps
+=== P=4 REP=1 ===
+P=4 rep=1 : 6.71 Gbps
+=== P=4 REP=2 ===
+P=4 rep=2 : 7.05 Gbps
+=== P=4 REP=3 ===
+P=4 rep=3 : 7.01 Gbps
+=== P=8 REP=1 ===
+P=8 rep=1 : 7.0 Gbps
+=== P=8 REP=2 ===
+P=8 rep=2 : 6.99 Gbps
+=== P=8 REP=3 ===
+P=8 rep=3 : 7.11 Gbps
+=== P=16 REP=1 ===
+P=16 rep=1 : 6.81 Gbps
+=== P=16 REP=2 ===
+bash: line 5: 1990167 Segmentation fault      (core dumped) iperf3 -c 10.99.99.2 -B 10.99.99.1 -P $P -t 20 -J > p${P}-rep${REP}.json 2>&1
+P=16 rep=2 : ERR Gbps
+=== P=16 REP=3 ===
+bash: line 5: 1990389 Segmentation fault      (core dumped) iperf3 -c 10.99.99.2 -B 10.99.99.1 -P $P -t 20 -J > p${P}-rep${REP}.json 2>&1
+P=16 rep=3 : ERR Gbps
+=== P=32 REP=1 ===
+P=32 rep=1 : 6.87 Gbps
+=== P=32 REP=2 ===
+P=32 rep=2 : 6.88 Gbps
+=== P=32 REP=3 ===
+P=32 rep=3 : 6.89 Gbps

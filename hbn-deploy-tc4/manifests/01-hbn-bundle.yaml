@@ -1,0 +1,479 @@
+---
+# BFB: the DOCA image that the DPU will boot once flashed.
+# Same URL as Spectro HBN profile.
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: BFB
+metadata:
+  name: bf-bundle-v25.10.1
+  namespace: dpf-operator-system
+spec:
+  url: https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.2.1-34_25.11_ubuntu-24.04_64k_prod.bfb
+  fileName: bf-bundle-3.2.1-34_25.11_ubuntu-24.04_64k_prod.bfb
+
+---
+# DPUCluster: Kamaji-managed tenant K8s control plane for DPU nodes.
+# VIP 172.16.30.250 (free in mgmt subnet 172.16.30.0/24) on br-dpu.
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUCluster
+metadata:
+  name: dpf-tenant
+  namespace: dpf-operator-system
+spec:
+  type: kamaji
+  maxNodes: 4
+  clusterEndpoint:
+    keepalived:
+      interface: br-dpu
+      vip: 172.16.30.250
+      virtualRouterID: 100
+
+---
+# DPUFlavor for HBN.
+# bf.cfg + nvconfig + ovs.rawConfigScript copied verbatim from
+# /tmp/hbn-values.yaml lines 13-67 (the Spectro HBN profile).
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUFlavor
+metadata:
+  name: hbn-v25.10.1
+  namespace: dpf-operator-system
+spec:
+  dpuMode: zero-trust
+  bfcfgParameters:
+    - UPDATE_ATF_UEFI=yes
+    - UPDATE_DPU_OS=yes
+    - WITH_NIC_FW_UPDATE=yes
+  configFiles:
+    - operation: override
+      path: /etc/mellanox/mlnx-bf.conf
+      permissions: "0644"
+      raw: |
+        ALLOW_SHARED_RQ="no"
+        IPSEC_FULL_OFFLOAD="no"
+        ENABLE_ESWITCH_MULTIPORT="yes"
+    - operation: override
+      path: /etc/mellanox/mlnx-ovs.conf
+      permissions: "0644"
+      raw: |
+        CREATE_OVS_BRIDGES="no"
+        OVS_DOCA="yes"
+    - operation: override
+      path: /etc/mellanox/mlnx-sf.conf
+      permissions: "0644"
+      raw: ""
+  grub:
+    kernelParameters:
+      - console=hvc0
+      - console=ttyAMA0
+      - earlycon=pl011,0x13010000
+      - fixrttc
+      - net.ifnames=0
+      - biosdevname=0
+      - iommu.passthrough=1
+      - cgroup_no_v1=net_prio,net_cls
+      - hugepagesz=2048kB
+      - hugepages=3072
+  nvconfig:
+    - device: '*'
+      parameters:
+        - PF_BAR2_ENABLE=0
+        - PER_PF_NUM_SF=1
+        - PF_TOTAL_SF=20
+        - PF_SF_BAR_SIZE=10
+        - NUM_PF_MSIX_VALID=0
+        - PF_NUM_PF_MSIX_VALID=1
+        - PF_NUM_PF_MSIX=228
+        - INTERNAL_CPU_MODEL=1
+        - INTERNAL_CPU_OFFLOAD_ENGINE=0
+        - SRIOV_EN=1
+        - NUM_OF_VFS=46
+        - LAG_RESOURCE_ALLOCATION=1
+        - LINK_TYPE_P1=ETH
+        - LINK_TYPE_P2=ETH
+        - EXP_ROM_UEFI_x86_ENABLE=1
+  ovs:
+    rawConfigScript: |
+      _ovs-vsctl() {
+        ovs-vsctl --no-wait --timeout 15 "$@"
+      }
+
+      _ovs-vsctl set Open_vSwitch . other_config:doca-init=true
+      _ovs-vsctl set Open_vSwitch . other_config:dpdk-max-memzones=50000
+      _ovs-vsctl set Open_vSwitch . other_config:hw-offload=true
+      _ovs-vsctl set Open_vSwitch . other_config:pmd-quiet-idle=true
+      _ovs-vsctl set Open_vSwitch . other_config:max-idle=20000
+      _ovs-vsctl set Open_vSwitch . other_config:max-revalidator=5000
+      _ovs-vsctl --if-exists del-br ovsbr1
+      _ovs-vsctl --if-exists del-br ovsbr2
+      _ovs-vsctl --may-exist add-br br-sfc
+      _ovs-vsctl set bridge br-sfc datapath_type=netdev
+      _ovs-vsctl set bridge br-sfc fail_mode=secure
+      _ovs-vsctl --may-exist add-port br-sfc p0
+      _ovs-vsctl set Interface p0 type=dpdk
+      _ovs-vsctl set Interface p0 mtu_request=9216
+      _ovs-vsctl set Port p0 external_ids:dpf-type=physical
+      _ovs-vsctl --may-exist add-port br-sfc p1
+      _ovs-vsctl set Interface p1 type=dpdk
+      _ovs-vsctl set Interface p1 mtu_request=9216
+      _ovs-vsctl set Port p1 external_ids:dpf-type=physical
+      _ovs-vsctl --may-exist add-br br-hbn
+      _ovs-vsctl set bridge br-hbn datapath_type=netdev
+      _ovs-vsctl set bridge br-hbn fail_mode=secure
+
+---
+# DPUServiceIPAM: pool1 for SVI on pf0hpf, loopback for VTEP.
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceIPAM
+metadata:
+  name: pool1
+  namespace: dpf-operator-system
+spec:
+  ipv4Network:
+    network: 172.16.97.0/24
+    gatewayIndex: 2
+    prefixSize: 29
+
+---
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceIPAM
+metadata:
+  name: loopback
+  namespace: dpf-operator-system
+spec:
+  ipv4Network:
+    network: 11.0.0.0/24
+    prefixSize: 32
+
+---
+# DPUServiceInterface CRs (DPF v25.10.1 schema: nested template-template).
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceInterface
+metadata:
+  name: p0
+  namespace: dpf-operator-system
+spec:
+  template:
+    spec:
+      template:
+        metadata:
+          labels:
+            uplink: "p0"
+        spec:
+          interfaceType: physical
+          physical:
+            interfaceName: p0
+
+---
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceInterface
+metadata:
+  name: p1
+  namespace: dpf-operator-system
+spec:
+  template:
+    spec:
+      template:
+        metadata:
+          labels:
+            uplink: "p1"
+        spec:
+          interfaceType: physical
+          physical:
+            interfaceName: p1
+
+---
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceInterface
+metadata:
+  name: pf0hpf
+  namespace: dpf-operator-system
+spec:
+  template:
+    spec:
+      template:
+        metadata:
+          labels:
+            interface: "pf0hpf"
+        spec:
+          interfaceType: pf
+          pf:
+            pfID: 0
+
+---
+# DPUServiceTemplate: references the doca-hbn Helm chart.
+# Matches Spectro profile (chart v1.0.5 + image v3.2.1-doca3.2.1).
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceTemplate
+metadata:
+  name: doca-hbn
+  namespace: dpf-operator-system
+spec:
+  deploymentServiceName: doca-hbn
+  helmChart:
+    source:
+      repoURL: https://helm.ngc.nvidia.com/nvidia/doca
+      version: 1.0.5
+      chart: doca-hbn
+    values:
+      image:
+        repository: nvcr.io/nvidia/doca/doca_hbn
+        tag: 3.2.1-doca3.2.1
+      resources:
+        memory: 6Gi
+        nvidia.com/bf_sf: 4
+
+---
+# DPUServiceConfiguration: HBN runtime config including
+# NUMBERED BGP override of the default unnumbered startupYAMLJ2.
+# Matches our fabric: p1 routed /31 + p0 VLAN 497 access mode with vlan497 SVI.
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceConfiguration
+metadata:
+  name: doca-hbn
+  namespace: dpf-operator-system
+spec:
+  deploymentServiceName: doca-hbn
+  serviceConfiguration:
+    serviceDaemonSet:
+      annotations:
+        k8s.v1.cni.cncf.io/networks: |-
+          [
+            {"name": "iprequest", "interface": "ip_lo", "cni-args": {"poolNames": ["loopback"], "poolType": "cidrpool"}},
+            {"name": "iprequest", "interface": "ip_pf0hpf_red", "cni-args": {"poolNames": ["pool1"], "poolType": "cidrpool", "allocateDefaultGateway": true}}
+          ]
+    helmChart:
+      values:
+        configuration:
+          perDPUValuesYAML: |
+            - hostnamePattern: "*"
+              values:
+                bgp_peer_group: hbn
+                role: RED
+                vrf: RED
+                vlan: 11
+                l2vni: 10010
+                l3vni: 100001
+                # Single AS for both DPUs (matches our current hand-rolled state: AS 65010 on gpu1, 65020 on gpu2)
+                # We use 65101 / 65102 to match the Spectro HBN profile defaults that the leaf was
+                # presumably configured for. If leaf is configured for 65010/65020, override per DPU below.
+                bgp_autonomous_system: 65101
+            - hostnamePattern: "*mt2439600dak*"
+              values:
+                bgp_autonomous_system: 65102
+
+          # Numbered-BGP override of the default unnumbered+EVPN startup template.
+          # Per our fabric: p1 is a routed /31; p0 is L2 switchport in VLAN 497 (SVI peering via vlan497).
+          # Loopback + pf0hpf SVI IPs are still drawn from IPAM (ip_lo, ip_pf0hpf_red).
+          # /31 IP on p1_if and /27 IP on vlan497 SVI are static-injected per DPU below.
+          startupYAMLJ2: |
+            - header:
+                model: bluefield
+                nvue-api-version: nvue_v1
+                rev-id: 1.0
+                version: HBN 2.4.0
+
+            - set:
+                bridge:
+                  domain:
+                    br_default:
+                      vlan:
+                        {{ config.vlan }}:
+                          vni:
+                            {{ config.l2vni }}: {}
+                        497: {}
+
+                evpn:
+                  enable: on
+                  route-advertise: {}
+
+                interface:
+                  lo:
+                    ip:
+                      address:
+                        {{ ipaddresses.ip_lo.ip }}/32: {}
+                    type: loopback
+
+                  # p1_if = routed swp with /31 (numbered eBGP to leaf .248 or .250)
+                  p1_if:
+                    type: swp
+                    link:
+                      mtu: 9000
+                    ip:
+                      address:
+                        {% if "mt24326005fn" in dpu_name %}
+                        172.16.97.249/31: {}
+                        {% else %}
+                        172.16.97.251/31: {}
+                        {% endif %}
+
+                  # p0_if = L2 switchport on br_default VLAN 497
+                  p0_if:
+                    type: swp
+                    link:
+                      mtu: 9000
+                    bridge:
+                      domain:
+                        br_default:
+                          access: 497
+
+                  # pf0hpf_if = L2 access port on br_default VLAN 11 (the tenant RED VLAN)
+                  pf0hpf_if:
+                    type: swp
+                    link:
+                      mtu: 9000
+                    bridge:
+                      domain:
+                        br_default:
+                          access: {{ config.vlan }}
+
+                  # vlan497 SVI = numbered eBGP peering via VLAN 497 to leaf .125
+                  vlan497:
+                    type: svi
+                    vlan: 497
+                    ip:
+                      address:
+                        {% if "mt24326005fn" in dpu_name %}
+                        172.16.97.98/27: {}
+                        {% else %}
+                        172.16.97.102/27: {}
+                        {% endif %}
+
+                  # vlan<tenant> SVI = gateway for pod VLAN 11 in VRF RED
+                  vlan{{ config.vlan }}:
+                    type: svi
+                    vlan: {{ config.vlan }}
+                    ip:
+                      address:
+                        {% if config.role == "RED" %}
+                        {{ ipaddresses.ip_pf0hpf_red.cidr }}: {}
+                        {% endif %}
+                      vrf: {{ config.vrf }}
+
+                nve:
+                  vxlan:
+                    arp-nd-suppress: on
+                    enable: on
+                    source:
+                      address: {{ ipaddresses.ip_lo.ip }}
+
+                router:
+                  bgp:
+                    enable: on
+                    graceful-restart:
+                      mode: full
+
+                vrf:
+                  default:
+                    router:
+                      bgp:
+                        address-family:
+                          ipv4-unicast:
+                            enable: on
+                            redistribute:
+                              connected:
+                                enable: on
+                          l2vpn-evpn:
+                            enable: on
+                        autonomous-system: {{ config.bgp_autonomous_system }}
+                        enable: on
+                        neighbor:
+                          # /31 path to leaf
+                          {% if "mt24326005fn" in dpu_name %}
+                          172.16.97.248:
+                          {% else %}
+                          172.16.97.250:
+                          {% endif %}
+                            remote-as: 65001
+                            type: numbered
+                            address-family:
+                              ipv4-unicast: {enable: on}
+                              l2vpn-evpn: {enable: on}
+                          # VLAN 497 SVI path to leaf
+                          172.16.97.125:
+                            remote-as: 65001
+                            type: numbered
+                            address-family:
+                              ipv4-unicast: {enable: on}
+                              l2vpn-evpn: {enable: on}
+                        path-selection:
+                          multipath:
+                            aspath-ignore: on
+                        router-id: {{ ipaddresses.ip_lo.ip }}
+
+                  {{ config.vrf }}:
+                    evpn:
+                      enable: on
+                      vni:
+                        {{ config.l3vni }}: {}
+                    loopback:
+                      ip:
+                        address:
+                          {{ ipaddresses.ip_lo.ip }}/32: {}
+                    router:
+                      bgp:
+                        address-family:
+                          ipv4-unicast:
+                            enable: on
+                            redistribute:
+                              connected:
+                                enable: on
+                            route-export:
+                              to-evpn:
+                                enable: on
+                        autonomous-system: {{ config.bgp_autonomous_system }}
+                        enable: on
+                        router-id: {{ ipaddresses.ip_lo.ip }}
+
+  interfaces:
+    - name: p0_if
+      network: mybrhbn
+    - name: p1_if
+      network: mybrhbn
+    - name: pf0hpf_if
+      network: mybrhbn
+
+---
+# DPUDeployment: ties together flavor + BFB + service + node selector.
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUDeployment
+metadata:
+  name: hbn-only
+  namespace: dpf-operator-system
+spec:
+  dpus:
+    bfb: bf-bundle-v25.10.1
+    flavor: hbn-v25.10.1
+    nodeEffect:
+      noEffect: true
+    dpuSets:
+    - nameSuffix: "dpuset1"
+      nodeSelector:
+        matchLabels:
+          feature.node.kubernetes.io/dpu-enabled: "true"
+          dpu/use-case: "hbn"
+  services:
+    doca-hbn:
+      serviceTemplate: doca-hbn
+      serviceConfiguration: doca-hbn
+  serviceChains:
+    switches:
+      - ports:
+        - serviceInterface:
+            matchLabels:
+              uplink: p0
+        - service:
+            name: doca-hbn
+            interface: p0_if
+      - ports:
+        - serviceInterface:
+            matchLabels:
+              uplink: p1
+        - service:
+            name: doca-hbn
+            interface: p1_if
+      - ports:
+        - serviceInterface:
+            matchLabels:
+              interface: pf0hpf
+        - service:
+            interface: pf0hpf_if
+            name: doca-hbn

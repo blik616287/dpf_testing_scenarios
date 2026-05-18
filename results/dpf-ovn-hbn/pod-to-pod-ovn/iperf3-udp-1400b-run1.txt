@@ -1,0 +1,2 @@
+iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: Operation timed out
+execing command in container d18ae1e1638b7a402c58ecd8a0c4d4fcb713d2280f90de9dee72e92dc94bd0df: command terminated with exit code 1

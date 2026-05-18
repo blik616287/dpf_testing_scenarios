@@ -1,0 +1,50 @@
+# Cilium values for the gpu1/gpu2 cluster.
+# Cluster details:
+#   - control plane API: 172.16.30.90:6443
+#   - pod CIDR: 10.244.0.0/16
+#   - service CIDR: 10.96.0.0/12
+#   - container runtime: spectro-containerd
+#
+# We replace kube-proxy with Cilium's eBPF dataplane (kubeadm init was
+# called with --skip-phases=addon/kube-proxy).
+
+kubeProxyReplacement: true
+k8sServiceHost: 172.16.30.90
+k8sServicePort: 6443
+
+# The host has many interfaces (DPU PFs, mgmt, etc); Cilium can't auto-detect.
+# br-dpu carries the cluster IP (172.16.30.90/24) and the default route.
+devices: br-dpu
+
+ipam:
+  mode: kubernetes
+
+# Default tunnel mode: vxlan. Works on any L3 fabric without BGP/leaf changes.
+tunnelProtocol: vxlan
+routingMode: tunnel
+
+ipv4:
+  enabled: true
+ipv6:
+  enabled: false
+
+# Hubble observability + relay + UI off by default; flip on later if wanted.
+hubble:
+  enabled: true
+  relay:
+    enabled: false
+  ui:
+    enabled: false
+
+operator:
+  replicas: 1   # single control-plane cluster
+
+# We're on spectro-containerd; cilium-agent needs to mount its CRI sock.
+# But we keep the default mount (which is /run/containerd/containerd.sock).
+# The cilium-cni binary on the host already exists at /opt/cni/bin.
+cni:
+  install: true
+  exclusive: true
+
+# Make sure default policy is "allow all" (no surprise drops on day 1)
+policyEnforcementMode: default

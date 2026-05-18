@@ -1,0 +1,66 @@
+# OVN VPC service — vpc-ovn-node config, IsolationClass, DPUVPC, DPUVirtualNetwork
+# OVN central reached at the DPF mgmt control-plane node 172.16.30.90 (ovn-central deployInCluster, control-plane affinity, exposedPorts NodePorts 30641/30642)
+---
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceConfiguration
+metadata:
+  name: vpc-ovn-node
+  namespace: dpf-operator-system
+spec:
+  deploymentServiceName: vpc-ovn-node
+  upgradePolicy:
+    applyNodeEffect: false
+  serviceConfiguration:
+    helmChart:
+      values:
+        dpu:
+          vpcOVNNode:
+            enabled: true
+            initContainers:
+              vpcOVNDpuProvisioner:
+                env:
+                  ovnSbEndpoint: "tcp:172.16.30.90:30642"
+            ipRequests:
+              - name: "vtep"
+                poolName: "vpc-ippool-vtep"
+                allocateIPWithIndex: 1
+              - name: "gateway"
+                poolName: "vpc-ippool-gateway"
+                allocateIPWithIndex: 1
+---
+apiVersion: vpc.dpu.nvidia.com/v1alpha1
+kind: IsolationClass
+metadata:
+  name: ovn.vpc.dpu.nvidia.com
+spec:
+  provisioner: ovn.vpc.dpu.nvidia.com
+  parameters:
+    ovn-nb-endpoint: "tcp:172.16.30.90:30641"
+    ovn-nb-reconnect-time: "5"
+---
+apiVersion: vpc.dpu.nvidia.com/v1alpha1
+kind: DPUVPC
+metadata:
+  name: bench-vpc
+  namespace: default
+spec:
+  tenant: bench
+  isolationClassName: ovn.vpc.dpu.nvidia.com
+  interNetworkAccess: false
+  nodeSelector: {}
+---
+apiVersion: vpc.dpu.nvidia.com/v1alpha1
+kind: DPUVirtualNetwork
+metadata:
+  name: bench-net
+  namespace: default
+spec:
+  vpcName: bench-vpc
+  type: Bridged
+  externallyRouted: true
+  masquerade: true
+  bridgedNetwork:
+    ipam:
+      ipv4:
+        dhcp: true
+        subnet: 10.100.0.0/16

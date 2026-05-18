@@ -3,7 +3,7 @@
 **Status:**
 - **Test Set 1** (Cilium passthrough ↔ VPC-OVN accelerated) — complete, n=4
 - **Test Set 2** (VPC-OVN hw-offload off ↔ on, apples-to-apples) — complete, n=4
-- **Test Cases 3 & 4** (HBN/ECMP) — first fabric ask **complete and validated** (Eth1/24/26 routed /31s, BGP Established on each DPU's `p1`); second fabric ask **open with network team** for the ECMP scaling test. See [§ 7. HBN Readiness](#7-hbn-readiness--test-cases-3--4).
+- **Test Cases 3 & 4** (HBN/ECMP) — **fabric fully ready**. Both fabric asks complete: routed /31s on Eth1/24 and Eth1/26 (p1 path), plus VLAN 497 SVI peering to each DPU's `ovnvtep` (second path). Each DPU now sees **two equal-cost BGP paths** to the leaf, with verified L4-hashed flow distribution across both physical uplinks. Blocked only on `dpf-ovn-hbn` cluster deploy + running the matrix (~3 h wall clock). See [§ 7. HBN Readiness](#7-hbn-readiness--test-cases-3--4).
 
 **Date:** 2026-05-13 (Test Set 2 + HBN underlay added 2026-05-13; Test Set 1 results from 2026-05-08)
 **Authors:** DPF testing team
@@ -368,20 +368,20 @@ n=4 per arm. Notable:
 
 ## 7. HBN Readiness — Test Cases 3 & 4
 
-Test Case 3 (qualitative HBN validation) and Test Case 4 (HBN A/B benchmark + ECMP scaling sweep) are **not yet executed**. They require deploying a third cluster (`dpf-ovn-hbn`) on the same hardware. The underlay is partially ready — the first fabric request is complete and verified; a follow-up fabric request is open with the network team.
+Test Case 3 (qualitative HBN validation) and Test Case 4 (HBN A/B benchmark + ECMP scaling sweep) are **not yet executed** as full DPF-HBN cluster runs — that requires deploying the `dpf-ovn-hbn` cluster profile and running the matrix. However, **the fabric underlay is now fully ECMP-ready**: both DPUs have two equal-cost BGP paths to the leaf, with verified flow distribution across both physical uplinks.
 
 ### 7.1 Readiness checklist
 
 | # | Dependency | Status | Notes |
 |---|---|---|---|
-| 1 | **First fabric ask** — convert `Eth1/24` and `Eth1/26` (gpu1.p1, gpu2.p1) on `custeng.leaf1.1` to routed `/31` interfaces with BGP listener | ✅ **DONE** | Configured by network engineering; documented in [`FABRIC_HBN_ECMP_REQUEST.md`](FABRIC_HBN_ECMP_REQUEST.md) |
-| 2 | **DPU-side BGP underlay validation** — bring FRR up on each DPU, verify BGP establishes, verify route propagation, verify L3 reachability to leaf loopback | ✅ **DONE** | See § 7.2 below |
-| 3 | **Second fabric ask** — add a second BGP peering per DPU so each DPU sees **two equal-cost paths** to the leaf (required for ECMP scaling) | 🟡 **PENDING — open with network team** | Documented in [`FABRIC_HBN_SECOND_PEERING_REQUEST.md`](FABRIC_HBN_SECOND_PEERING_REQUEST.md). Without it, ECMP installs only one next-hop and TC4's scaling table will read flat. |
-| 4 | DPU-side second BGP neighbor (FRR) | ⏸ Blocked on #3 | ~10 min DPU-side work once #3 is in |
-| 5 | Deploy `dpf-ovn-hbn` cluster profile | ⏸ Blocked on #3 | Profile UID `698dd2dd4b0c719b6c763605` in `scripts/dpf_deploy.py` |
-| 6 | TC3 qualitative validation (BGP Established, ECMP routes installed, per-uplink traffic balance, failover) | ⏸ Blocked on #3-5 | ~30 min |
-| 7 | TC4 11×5 benchmark matrix on HBN cluster | ⏸ Blocked on #3-6 | ~80 min |
-| 8 | TC4 ECMP scaling sweep (1, 2, 4, 8, 16, 32 parallel streams) | ⏸ Blocked on #3-6 | ~30 min |
+| 1 | **First fabric ask** — convert `Eth1/24` and `Eth1/26` (gpu1.p1, gpu2.p1) on `custeng.leaf1.1` to routed `/31` interfaces with BGP listener | ✅ **DONE** | [`FABRIC_HBN_ECMP_REQUEST.md`](FABRIC_HBN_ECMP_REQUEST.md) |
+| 2 | **DPU-side BGP underlay validation** — bring FRR up on each DPU, verify BGP establishes, verify route propagation, verify L3 reachability to leaf loopback | ✅ **DONE** | See § 7.2 |
+| 3 | **Second fabric ask** — add a second BGP peering per DPU via the VLAN 497 SVI so each DPU sees **two equal-cost paths** | ✅ **DONE** | Configured by network engineering; [`FABRIC_HBN_SECOND_PEERING_REQUEST.md`](FABRIC_HBN_SECOND_PEERING_REQUEST.md). Leaf SVI added at `172.16.97.125/27`. |
+| 4 | DPU-side second BGP neighbor (FRR) + `maximum-paths 2` + L4 hash policy | ✅ **DONE** | Both DPUs have BGP Established to `172.16.97.125`, 124 prefixes received, kernel installs ECMP route with two next-hops, `net.ipv4.fib_multipath_hash_policy=1` enabled. See § 7.3. |
+| 5 | Deploy `dpf-ovn-hbn` cluster profile | ⏸ Next step | Profile UID `698dd2dd4b0c719b6c763605` in `scripts/dpf_deploy.py`. Will tear down `dpf-ovn-accelerated` first. |
+| 6 | TC3 qualitative validation (BGP Established in HBN container, ECMP routes installed, per-uplink traffic balance, failover) | ⏸ Blocked on #5 | ~30 min |
+| 7 | TC4 11×5 benchmark matrix on HBN cluster | ⏸ Blocked on #5 | ~80 min |
+| 8 | TC4 ECMP scaling sweep (1, 2, 4, 8, 16, 32 parallel streams) | ⏸ Blocked on #5 | ~30 min |
 
 ### 7.2 What we verified after the first fabric ask landed
 
@@ -420,37 +420,59 @@ We then verified the underlay end-to-end:
 
 **Conclusion:** the p1 fabric path is correctly configured and end-to-end functional at L3, with BGP exchanging routes as designed. The underlay layer is HBN-ready for **one** path per DPU.
 
-### 7.3 Why the second fabric ask is necessary (open with network team)
+### 7.3 ECMP underlay verified — both DPUs have two equal-cost BGP paths
 
-Each DPU currently sees **one** BGP path to the leaf (its own `p1`). For TC4's ECMP scaling sweep to show bandwidth aggregation across both physical uplinks (`p0` + `p1`), the DPU's routing table needs **two equal-cost next-hops** to the same destination. With one path, BGP installs one route; with two paths, BGP installs an ECMP route and the kernel hashes flows across both next-hops.
+The network team added the second peering via VLAN 497's SVI to each DPU's `ovnvtep`. We then configured FRR on each DPU with the new neighbor + `maximum-paths 2` + enabled L4 ECMP hashing (`net.ipv4.fib_multipath_hash_policy=1`). The result, verified on each DPU:
 
-The simplest way to add the second path **without disrupting the running VPC-OVN cluster** (which keeps `Eth1/23`/`Eth1/25` in VLAN 497) is to peer BGP via the leaf's VLAN 497 SVI to each DPU's existing `ovnvtep` IP:
+#### `show ip bgp summary` (each DPU)
 
-| DPU | Existing `ovnvtep` IP | New BGP path | New peer = leaf VLAN 497 SVI IP |
-|---|---|---|---|
-| gpu1 | `172.16.97.98/27` (live since VPC-OVN deployment) | over VLAN 497 fabric (Eth1/23 ↔ Eth1/25) | `172.16.97.125/27` (proposed; any IP in `172.16.97.96/27` works) |
-| gpu2 | `172.16.97.102/27` | same VLAN 497 transport | same proposed SVI IP |
+| DPU | Neighbor | Remote AS | State | Prefixes received |
+|---|---|---|---|---|
+| gpu1 | `172.16.97.125` (leaf VLAN 497 SVI) | 65001 | **Established** | 124 |
+| gpu1 | `172.16.97.248` (leaf Eth1/24 /31) | 65001 | **Established** | 124 |
+| gpu2 | `172.16.97.125` (leaf VLAN 497 SVI) | 65001 | **Established** | 124 |
+| gpu2 | `172.16.97.250` (leaf Eth1/26 /31) | 65001 | **Established** | 124 |
 
-This adds **one BGP neighbor stanza per DPU** on the leaf and **one SVI secondary-IP line**, ~10 lines of NX-OS total. The /31s and Eth1/24/26 config from the first ask stay exactly as-is. The full follow-up request including the proposed config is in [`FABRIC_HBN_SECOND_PEERING_REQUEST.md`](FABRIC_HBN_SECOND_PEERING_REQUEST.md).
-
-Once that's in place, each DPU's routing table will read something like:
+#### `show ip route 11.0.0.111` (each DPU)
 
 ```
-11.0.0.111/32  proto bgp  metric 20
-  nexthop via 172.16.97.248 dev p1       weight 1   (first ask — Eth1/24 /31)
-  nexthop via 172.16.97.125 dev ovnvtep  weight 1   (second ask — VLAN 497 SVI)
+gpu1 DPU:
+  Routing entry for 11.0.0.111/32
+    Known via "bgp", distance 20, metric 0, best
+    Last update 00:00:14 ago
+    * 172.16.97.125, via ovnvtep, weight 1   ← VLAN 497 SVI path
+    * 172.16.97.248, via p1,      weight 1   ← p1 /31 path
+
+gpu2 DPU:
+  Routing entry for 11.0.0.111/32
+    Known via "bgp", distance 20, metric 0, best
+    * 172.16.97.125, via ovnvtep, weight 1
+    * 172.16.97.250, via p1,      weight 1
 ```
 
-…and TC4's parallel-flow sweep will exercise both physical uplinks.
+#### ECMP flow distribution check (gpu1, 10 synthetic L4 flows)
 
-### 7.4 Alternatives that were considered and rejected
+With `fib_multipath_hash_policy=1` enabled, varying L4 source ports produces different next-hop selections:
 
-| Alternative | Why we rejected it |
+```
+flow 1: via 172.16.97.125   flow 6: via 172.16.97.125
+flow 2: via 172.16.97.125   flow 7: via 172.16.97.248
+flow 3: via 172.16.97.248   flow 8: via 172.16.97.125
+flow 4: via 172.16.97.248   flow 9: via 172.16.97.248
+flow 5: via 172.16.97.248   flow 10: via 172.16.97.248
+```
+
+Approximate 6:4 split across the two paths. Both physical uplinks exercised. **The fabric is now fully ECMP-ready for TC4's parallel-flow scaling sweep.**
+
+### 7.4 Why this specific design (and the alternatives we considered)
+
+| Alternative | Status |
 |---|---|
-| Add p1 ports to VLAN 497 (same broadcast domain as p0) | One VLAN = one SVI = one BGP next-hop. ECMP installs only one path. TC4 sweep would be flat. The point of ECMP is bandwidth aggregation across distinct next-hops. |
-| Convert p0 to routed /31s as well | Breaks the live VPC-OVN cluster (Eth1/23/25 currently in VLAN 497 carries the geneve underlay). Loses our completed Test Set 1 + Test Set 2 dataset unless we redeploy + re-run ~80 minutes of benchmarks. |
-| Add p1 as a separate VLAN with its own SVI | Equivalent topology to the proposed /31 + SVI but more switch state. NVIDIA's HBN doc reference shows numbered /31 or unnumbered routed interfaces, not access-VLAN-per-uplink. |
-| BGP unnumbered (NVIDIA's preferred per the HBN doc) | Network engineer chose numbered /31 — both are explicitly supported per the doc (§ *Ethernet Virtual Private Network - EVPN*: "For the underlay, only IPv4 or BGP unnumbered configuration is supported"). Numbered is simpler from a Cisco NX-OS 9.3 standpoint. |
+| **Routed /31s for p1 + VLAN 497 SVI peering for p0/ovnvtep path** (chosen) | ✅ Implemented. Two distinct L3 next-hops per DPU. Does not disturb the live VPC-OVN cluster (Eth1/23/25 stay in VLAN 497). |
+| Add p1 ports to VLAN 497 alongside p0 | ❌ One VLAN = one SVI = one BGP next-hop. ECMP would install only one path; TC4 scaling sweep would be flat. |
+| Convert p0 to routed /31s as well | ❌ Would break the live VPC-OVN cluster (Eth1/23/25 currently in VLAN 497 carry the geneve underlay). Would lose our completed Test Set 1 + Test Set 2 datasets. |
+| Add p1 as a separate VLAN with its own SVI | ❌ Functionally equivalent to the routed /31 + VLAN-497-SVI design we chose, but more switch state. |
+| BGP unnumbered (NVIDIA's preferred in the HBN reference doc) | ❌ Network engineer chose numbered /31 — both are supported per the DOCA HBN Service Guide 2.6.0 § *Ethernet Virtual Private Network - EVPN*: "For the underlay, only IPv4 or BGP unnumbered configuration is supported". Numbered is simpler on Cisco NX-OS 9.3. |
 
 ### 7.5 What will be measured once unblocked
 
@@ -506,7 +528,7 @@ Plus the qualitative TC3 checks: BGP session established (`birdc show protocols`
 2. **Single-flow UDP loss is iperf3-bound, not network-bound.** The receiver's iperf3 process is the bottleneck; the same loss percentage appears in every arm because the bottleneck is identical. Multi-flow UDP with RSS would behave differently.
 3. **Pods run on the DPU tenant cluster, not on the host cluster.** This was a forced choice — the host cluster runs Cilium and has no DPF acceleration path. Running the bench pods on the DPU tenant cluster keeps the dataplane on the DPU's br-int, which is the path under test. CPU costs reported are host-side (gpu1 and gpu2 hosts via the persistent `mpstat` slicer), not DPU-side, so the "host CPU saved" metric is the right one.
 4. **Plumbing for VPC-OVN pod attachment was manual** (steps 6 & 7 in § 3.3). DPF v25.10.1's `vpc-ovn-node` agent only auto-binds OVS ports for pods with `ServiceInterface` CRs, not raw NAD-annotated pods. For production use the operator-managed flow should be used.
-5. **HBN ECMP scaling can't be demonstrated yet — but the underlay is partially ready.** The first fabric ask (Eth1/24/26 routed /31s, BGP eBGP) is complete and validated end-to-end (BGP Established, 123 prefixes received per DPU, leaf loopback `11.0.0.111/32` reachable). The second fabric ask (additional BGP peering via VLAN 497's SVI so each DPU sees two equal-cost next-hops) is open with the network team — see [§ 7](#7-hbn-readiness--test-cases-3--4) and [`FABRIC_HBN_SECOND_PEERING_REQUEST.md`](FABRIC_HBN_SECOND_PEERING_REQUEST.md). Without the second path, BGP installs only one next-hop and the TC4 scaling sweep would read flat.
+5. **HBN ECMP scaling can't be demonstrated yet — but the fabric is fully ready.** Both fabric asks are complete: routed /31s on `Eth1/24` and `Eth1/26` (p1 path) plus VLAN 497 SVI peering at `172.16.97.125/27` to each DPU's `ovnvtep` (second path). Each DPU sees two equal-cost BGP paths to the leaf with verified L4-hashed flow distribution. The only remaining work is deploying the `dpf-ovn-hbn` cluster profile and running the matrix — see [§ 7](#7-hbn-readiness--test-cases-3--4).
 6. **Host PCIe link to BF3 is Gen3 x16 (8 GT/s), not Gen5.** The Supermicro X10 host pre-dates BF3 by ~5 years and its root complex tops out at PCIe Gen3. Theoretical PCIe bandwidth ~16 GB/s is well above the 40 GbE fabric requirement (~5 GB/s), so this does not bottleneck the test — but a newer host platform would enable Gen5 link-up. Worth recording for clients evaluating BF3 on newer hosts.
 7. **The 40 GbE fabric speed is a switchport config choice, not a BF3 limit.** BF3 supports 200 GbE per port; the switch (Cisco Nexus, NX-OS 9.3, QSFP-H40G-AOC15M cables) is configured at 40 Gb/s. Numbers reported are at fabric line rate **as configured in this lab**, not at BF3's silicon ceiling.
 
@@ -528,12 +550,105 @@ For the customer-facing positioning ("the DPU pays for itself by freeing host co
 
 ### What's next: HBN/ECMP
 
-The HBN/ECMP test (§ 7) adds a second value-prop — **multi-uplink aggregate bandwidth via BGP ECMP**. The fabric is **partially ready**:
+The HBN/ECMP test (§ 7) adds a second value-prop — **multi-uplink aggregate bandwidth via BGP ECMP**. **The fabric is now fully ready:**
 
-- ✅ The first fabric ask (Eth1/24/26 routed /31s, eBGP on each DPU's `p1`) is complete and validated. BGP is Established between each DPU and the leaf, 123 prefixes are propagating, and the leaf loopback `11.0.0.111/32` is reachable from each DPU at ~0.5 ms RTT.
-- 🟡 The second fabric ask (a second BGP peering per DPU via VLAN 497's SVI, so the routing table sees two equal-cost next-hops) is open with the network team. Documented in [`FABRIC_HBN_SECOND_PEERING_REQUEST.md`](FABRIC_HBN_SECOND_PEERING_REQUEST.md). Without it, BGP installs only one path and the TC4 scaling sweep would be flat.
+- ✅ First fabric ask (Eth1/24/26 routed /31s, eBGP on each DPU's `p1`) — complete, BGP Established, 124 prefixes propagating, leaf loopback `11.0.0.111/32` reachable from each DPU at ~0.5 ms.
+- ✅ Second fabric ask (VLAN 497 SVI at `172.16.97.125/27` with eBGP peering to each DPU's `ovnvtep`) — complete. Both DPUs now have **two equal-cost BGP paths** in the kernel routing table, with L4 hash policy enabled and verified flow distribution across both physical uplinks.
 
-Once the second peering lands, the existing test infrastructure (scripts, OVN/NAD setup, runner) reuses cleanly for the `dpf-ovn-hbn` cluster — estimated ~3 hours wall clock to complete TC3 + TC4 + the ECMP scaling sweep.
+The only remaining work is deploying the `dpf-ovn-hbn` cluster profile (tearing down `dpf-ovn-accelerated` first) and running the matrix. The existing test infrastructure (scripts, NAD setup, runner) reuses cleanly. Estimated ~3 hours wall clock to complete TC3 + TC4 + the ECMP scaling sweep.
+
+---
+
+## 8. Test Case 4 — HBN + OVN Pod-to-Pod Results
+
+**Date:** 2026-05-17 · **Source data:** `results/dpf-ovn-hbn/pod-to-pod-ovn/` · **Aggregator:** `results/dpf-ovn-hbn/aggregate-text.py`
+
+### 8.1 What was measured
+
+Pod-to-pod benchmark across the **co-deployed OVN VPC + DOCA HBN** stack on the
+two BlueField-3 DPUs, deployed via the **NVIDIA DPF Operator** (no Palette):
+
+- **Cilium** remains the management CNI; **OVN VPC** is the second, offloaded pod
+  network attached via Multus (`vpc-net1` NAD → DPUVirtualNetwork `bench-net`).
+- Each benchmark pod gets a **hardware Scalable Function** (`nvidia.com/bf_sf`).
+  The SF representor lands in the DPU's OVN integration bridge `br-int`;
+  **OVS-DOCA hardware-offloads** the OVN pipeline to the BlueField eswitch
+  (offloaded datapath flows confirmed present during traffic).
+- Pod traffic is **Geneve-encapsulated by OVN** and the overlay rides the
+  **HBN BGP/ECMP underlay** (geneve VTEP → HBN-routed → fabric).
+- `bench-client` (gpu1) ↔ `bench-server` (gpu2), iperf 3.19, **MTU 1500**, 5 runs ×
+  30 s per point (run 1 = warmup; stats over runs 2–5).
+
+### 8.2 Important caveats (read before citing numbers)
+
+1. **One geneve tunnel ≈ one HBN uplink — see §8.5.** All 4 HBN BGP sessions are
+   Established and the HBN VTEP route carries **2 equal-cost ECMP next-hops**, but
+   a *single* pod-to-pod geneve tunnel does **not** spread across both uplinks.
+   The figures below are therefore a single ~40 G uplink, and that is the real
+   ceiling for one pod pair — not a test artifact.
+2. **MTU 1500**, where Test Sets 1–2 used jumbo (~9000). Cross-set comparison is
+   *indicative*, not strict apples-to-apples.
+3. iperf 3.16 on the DPU host segfaults on multi-stream; the matrix was run with
+   iperf **3.19** via `crictl exec` inside the pod.
+
+### 8.3 Results — TC4 matrix (n=4, runs 2–5)
+
+| Metric | Result |
+|---|---:|
+| TCP single-stream | **19.7 Gbps** (16.4–28.6, σ 5.9) |
+| TCP 8-stream | **36.3 Gbps** |
+| TCP 16-stream | **36.3 Gbps** |
+| UDP max-rate (`-b 0`) | 4.22 Gbps, 19.0 % loss |
+| UDP 1400-byte | 4.81 Gbps, 0 % loss |
+| UDP 64-byte | 0.21 Gbps, 8.5 % loss (datagram/PPS-bound) |
+
+### 8.4 ECMP scaling sweep (TCP, parallel flows)
+
+| Flows | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---:|---:|---:|---:|---:|---:|
+| Aggregate Gbps | 19.7 | 33.5 | 36.3 | 36.3 | 36.3 | 36.3 |
+
+Throughput climbs from one flow and **saturates one 40 G fabric uplink at ~36.3
+Gbps by 2–4 flows**, then stays flat — the expected single-link ceiling.
+
+### 8.5 HBN ECMP — measured, not projected (key finding)
+
+An earlier draft of this report *projected* ~2 × 36.3 ≈ 72.6 Gbps once all 4 HBN
+BGP sessions were up. **That projection was tested and does not hold.** With all
+4 sessions Established and the HBN VTEP route showing **2 equal-cost ECMP
+next-hops** (`172.16.97.125`/vlan497 + `172.16.97.248`/p1_if, weight 1 each),
+a P=16 run still measured **36.2 Gbps** — one uplink — and the DPU uplink byte
+counters were skewed **~30 : 1 toward p0** (`p0` ≈ 18.5 TB vs `p1` ≈ 0.6 TB).
+
+**Why:** a single pod-to-pod flow rides **one OVN geneve tunnel** between the two
+DPU VTEPs (`10.0.120.2 → 10.0.120.10`). All inner streams share that tunnel's
+outer 5-tuple, so the HBN ECMP underlay hashes the entire tunnel onto **one**
+uplink. ECMP needs per-flow entropy in the outer header; a single geneve VTEP
+pair does not provide it.
+
+**Consequence:** HBN 2-uplink ECMP does **not** multiply a single pod-pair's
+throughput. Its real value is **aggregate horizontal scale** — many DPU pairs /
+many VTEPs hash across both uplinks, so total fabric throughput across a fleet
+approaches 2 × per-uplink. For a single pair the ceiling is one uplink (~36 Gbps
+here / ~39 Gbps at jumbo). Raising a single pair would need geneve outer
+source-port entropy (OVS-DOCA) or multiple SFs/VTEPs per pod — neither was
+in scope here.
+
+### 8.6 Comparison to Test Sets 1–2
+
+| Metric | Passthrough (jumbo) | VPC-OVN accel (jumbo) | HBN+OVN (MTU 1500, 1 uplink) |
+|---|---:|---:|---:|
+| TCP single-stream | 20.5 Gbps | 27.1 Gbps | 19.7 Gbps |
+| TCP multi-stream | 39.4 (line rate) | 39.4 (line rate) | 36.3 (1×40 G line rate) |
+
+HBN+OVN multi-stream saturates its fabric uplink as the earlier sets did. The
+single-stream figure is lower, consistent with the smaller MTU (more per-packet
+overhead) and the longer SFC path (OVN geneve + HBN). Per §8.5, HBN's 2-uplink
+ECMP does **not** raise a single pod-pair above one-uplink line rate — its value
+is fleet-level aggregate scale, not single-flow speed-up. So for a single
+pod-to-pod path, HBN+OVN performs **on par with** the VPC-OVN-accelerated set
+(both ~one-link line rate); HBN adds resilience and multi-pair aggregate headroom,
+not single-pair throughput.
 
 ---
 
