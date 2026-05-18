@@ -29,7 +29,7 @@ Reference specs inspected to inform this request (full URLs in **§10 Sources**)
 | Ref | What it specifies | NVIDIA source |
 |---|---|---|
 | [R1] | HBN `startupYAMLJ2`: eBGP per uplink, `peer-group hbn` / `remote-as external`, neighbors on `p0_if`/`p1_if`, ECMP via `path-selection multipath aspath-ignore on`, `multipath ebgp 16`, redistribute connected, AS 65101/65201 per worker | `doca-platform` repo — `hbn-ovnk` use-case guide |
-| [R2] | ToR/leaf fabric config — routed uplinks, **BGP unnumbered**, `peer-group hbn remote-as external`, `path-selection multipath aspath-ignore on`, redistribute connected/static, leaf AS 65001, loopback 11.0.0.101/32 | RDG → **Fabric Configuration** page |
+| [R2] | ToR/leaf fabric config — routed uplinks, **BGP unnumbered**, `peer-group hbn remote-as external`, `path-selection multipath aspath-ignore on`, redistribute connected/static, leaf AS 65001, loopback 11.0.0.111/32 | RDG → **Fabric Configuration** page |
 | [R3] | HBN BGP neighbor model (`type: unnumbered`), `multipath ebgp 16`, p0_if/p1_if uplinks/MTU; "ToR must support BGP and EVPN" | `doca-platform` repo — `hbn` use-case guide |
 | [R4] | DPF system prerequisites — `host-trusted` mode, "DPU high-speed ports p0/p1 must be connected to the network", DPF v25.10.1 | `doca-platform` repo — host-trusted prerequisites |
 | [R5] | Product context — "HBN enables routing on the server side using BlueField as a BGP router"; OVN-Kubernetes provides the geneve overlay | RDG Introduction / DPF v25.10.1 docs |
@@ -114,7 +114,7 @@ config is worse than a clean numbered one.
 ## 3. Target topology
 
 ```
-                         custeng.leaf1.1   (Cisco Nexus, AS 65001, lo 11.0.0.101/32)
+                         custeng.leaf1.1   (Cisco Nexus, AS 65001, lo 11.0.0.111/32)
         Eth1/23 ─┐   Eth1/24 ─┐      ┌─ Eth1/25      ┌─ Eth1/26
             │             │                │              │
         gpu1 p0       gpu1 p1          gpu2 p0        gpu2 p1
@@ -136,7 +136,7 @@ no VLAN. Leaf port numbers are from prior fabric notes — **confirm with
 ### 4.1 AS numbers & loopbacks — apply to BOTH routes
 | Device | BGP AS | Loopback (router-id) |
 |---|---|---|
-| `custeng.leaf1.1` | **65001** | `11.0.0.101/32` |
+| `custeng.leaf1.1` | **65001** | `11.0.0.111/32` |
 | gpu1 (HBN) | **65010** | `11.0.0.1/32` |
 | gpu2 (HBN) | **65020** | `11.0.0.2/32` |
 
@@ -150,12 +150,16 @@ to churn working ASNs. HBN is set to 65010/65020 in its DPUServiceConfiguration.
 ### 4.2 /31 transit links — **Route B (numbered) only**
 Route A (unnumbered) needs **no /31s** — links use IPv6 link-local only.
 
-| Link | Leaf int | Leaf IP /31 | Host port | Host IP /31 |
-|---|---|---|---|---|
-| gpu1-p0 | Eth1/23 | `172.16.97.240/31` | gpu1 p0 (`p0_if`) | `172.16.97.241/31` |
-| gpu1-p1 | Eth1/24 | `172.16.97.242/31` | gpu1 p1 (`p1_if`) | `172.16.97.243/31` |
-| gpu2-p0 | Eth1/25 | `172.16.97.244/31` | gpu2 p0 (`p0_if`) | `172.16.97.245/31` |
-| gpu2-p1 | Eth1/26 | `172.16.97.246/31` | gpu2 p1 (`p1_if`) | `172.16.97.247/31` |
+| Link | Leaf int | Leaf IP /31 | Host port (HBN) | Host IP /31 | Status |
+|---|---|---|---|---|---|
+| gpu1-p0 | `Eth1/23` | `172.16.97.240/31` | gpu1 p0 (`p0_if`) | `172.16.97.241/31` | **new** — convert from VLAN 497 access |
+| gpu1-p1 | `Eth1/24` | `172.16.97.248/31` | gpu1 p1 (`p1_if`) | `172.16.97.249/31` | **existing — keep unchanged** |
+| gpu2-p0 | `Eth1/25` | `172.16.97.242/31` | gpu2 p0 (`p0_if`) | `172.16.97.243/31` | **new** — convert from VLAN 497 access |
+| gpu2-p1 | `Eth1/26` | `172.16.97.250/31` | gpu2 p1 (`p1_if`) | `172.16.97.251/31` | **existing — keep unchanged** |
+
+Confirmed real state (custeng.leaf1.1): leaf ASN `65001`, leaf loopback
+`11.0.0.111`. The two `p1` /31s already exist and are kept verbatim; only the
+two `p0` links are new (suggested /31s above — adjust to fabric IPAM).
 
 **Routes the leaf will learn from each DPU:** the DPU loopback `/32`
 (`11.0.0.1`/`11.0.0.2`) and the OVN underlay subnets HBN redistributes — the
@@ -167,6 +171,11 @@ The leaf transits these between the two DPUs.
 ## 5. Leaf configuration — Cisco NX-OS
 
 ### ROUTE A — BGP unnumbered  *(matches NVIDIA reference [R2] — use ONLY if Phase A0 confirms the platform supports it)*
+
+> **STATUS: DEFERRED.** Network engineering selected **Route B (numbered /31)**
+> for the first all-routed test — it avoids the NX-OS RFC 5549 / link-local /
+> `ing-sup` TCAM-recarve + reload risk. Route A is retained below as the
+> documented unnumbered alternative if it is revisited later.
 
 > Reference [R2] (Cumulus/NVUE):
 > `nv set interface swp11-14` routed, no IP · `nv set vrf default router bgp
@@ -229,13 +238,13 @@ BFD multihop.
 route-map ALLOW-ALL permit 10
 
 router bgp 65001
-  router-id 11.0.0.101
+  router-id 11.0.0.111
   bestpath as-path multipath-relax           ! mirrors reference 'aspath-ignore on'
   log-neighbor-changes
   address-family ipv4 unicast
     maximum-paths 4                          ! ECMP across the 4 uplinks
     redistribute direct route-map ALLOW-ALL  ! advertise loopback + connected
-    network 11.0.0.101/32
+    network 11.0.0.111/32
 
   neighbor Ethernet1/23
     remote-as 65010
@@ -269,31 +278,41 @@ Route B.**
 
 ### ROUTE B — Numbered /31  *(use if unnumbered is not viable — functionally identical eBGP)*
 
-#### B1 — Routed interfaces (×4), using §4.2 addressing
+#### B1 — Routed interfaces — only the two `p0` ports change
+
+`Eth1/24` and `Eth1/26` are **already routed /31** (`172.16.97.248` /
+`172.16.97.250`) — leave them as-is; they only need BGP added (B2). Convert just
+the two `p0` access ports:
 ```
-default interface Ethernet1/23
+default interface Ethernet1/23          ! gpu1-p0 — clears VLAN 497 access config
 interface Ethernet1/23
   description L3-uplink-gpu1-p0-HBN
   no switchport
   mtu 9216
   ip address 172.16.97.240/31
   no shutdown
+
+default interface Ethernet1/25          ! gpu2-p0 — clears VLAN 497 access config
+interface Ethernet1/25
+  description L3-uplink-gpu2-p0-HBN
+  no switchport
+  mtu 9216
+  ip address 172.16.97.242/31
+  no shutdown
 ```
-Repeat for `Eth1/24` (`172.16.97.242/31`), `Eth1/25` (`172.16.97.244/31`,
-`default interface` first), `Eth1/26` (`172.16.97.246/31`).
 
 #### B2 — BGP
 ```
 route-map ALLOW-ALL permit 10
 
 router bgp 65001
-  router-id 11.0.0.101
+  router-id 11.0.0.111
   bestpath as-path multipath-relax
   log-neighbor-changes
   address-family ipv4 unicast
     maximum-paths 4
     redistribute direct route-map ALLOW-ALL
-    network 11.0.0.101/32
+    network 11.0.0.111/32
   template peer HBN-DPU
     address-family ipv4 unicast
       send-community
@@ -301,16 +320,26 @@ router bgp 65001
   neighbor 172.16.97.241 remote-as 65010
     inherit peer HBN-DPU
     description gpu1-p0
-  neighbor 172.16.97.243 remote-as 65010
+  neighbor 172.16.97.249 remote-as 65010
     inherit peer HBN-DPU
     description gpu1-p1
-  neighbor 172.16.97.245 remote-as 65020
+  neighbor 172.16.97.243 remote-as 65020
     inherit peer HBN-DPU
     description gpu2-p0
-  neighbor 172.16.97.247 remote-as 65020
+  neighbor 172.16.97.251 remote-as 65020
     inherit peer HBN-DPU
     description gpu2-p1
 ```
+
+#### B3 — Post-conversion cleanup (do this *after* §7.B verification)
+Once the two new `p0` eBGP sessions are `Established` and routes are learned,
+the VLAN 497 path is no longer used by HBN — remove the temporary SVI + peering:
+```
+no interface Vlan497
+! also remove any BGP neighbor / peer-group that peered over the Vlan497 SVI
+```
+Do this **only after** p0 eBGP is verified up, **not before** — and confirm no
+other fabric service still depends on VLAN 497.
 
 ---
 
@@ -318,7 +347,7 @@ router bgp 65001
 ```
 interface loopback0
   description leaf-router-id
-  ip address 11.0.0.101/32
+  ip address 11.0.0.111/32
 ```
 **BFD** (recommended — sub-second failover; HBN supports it; BFD for unnumbered
 is supported from NX-OS 9.3(3), single-hop only [R6]):
@@ -380,11 +409,13 @@ ping 11.0.0.2 packet-size 8972 df-bit count 5
 
 ### 7.B Route B — numbered
 ```
-ping 172.16.97.241 source 172.16.97.240 packet-size 8972 df-bit count 5   ! gpu1-p0, expect 5/5
-                                                                          ! repeat .243/.245/.247
+ping 172.16.97.241 source 172.16.97.240 packet-size 8972 df-bit count 5   ! gpu1-p0 (new),      expect 5/5
+ping 172.16.97.249 source 172.16.97.248 packet-size 8972 df-bit count 5   ! gpu1-p1 (existing /31)
+ping 172.16.97.243 source 172.16.97.242 packet-size 8972 df-bit count 5   ! gpu2-p0 (new)
+ping 172.16.97.251 source 172.16.97.250 packet-size 8972 df-bit count 5   ! gpu2-p1 (existing /31)
 show ip bgp summary                          ! 4 neighbors, State/PfxRcd = a number (not Idle/Active)
-show ip route 11.0.0.1                        ! ECMP: two next-hops via 172.16.97.241 + .243
-show ip route 11.0.0.2                        ! ECMP: two next-hops via .245 + .247
+show ip route 11.0.0.1                        ! gpu1 loopback — ECMP: next-hops via .241 + .249
+show ip route 11.0.0.2                        ! gpu2 loopback — ECMP: next-hops via .243 + .251
 show forwarding ipv4 route 11.0.0.1
 ```
 
@@ -438,7 +469,9 @@ p1 (Eth1/24, Eth1/26) returns to its pre-change state. TCAM `ing-sup` carving
 6. **AS numbers** — leaf keeps its existing ASN; gpu1/gpu2 keep the existing
    fabric ASNs **65010 / 65020** (already live on the `p1` sessions). Confirm no
    collision.
-7. **IP block (Route B only)** — `172.16.97.240/29` free for the four /31s.
+7. **IP block (Route B)** — two free /31s for the **new p0 links** (doc
+   suggests `172.16.97.240/31` + `172.16.97.242/31`); the p1 /31s
+   (`172.16.97.248`/`.250`) are kept unchanged.
 8. **Jumbo MTU** — confirm `mtu 9216` applies on routed Eth1/23 & 1/25 (1/24 &
    1/26 already 9216), or apply the platform jumbo policy first.
 9. **BFD** — apply or not (recommended).
@@ -471,7 +504,7 @@ NVIDIA Docs (Solutions).
 - Used for: the ToR/leaf reference — routed uplinks, BGP **unnumbered**
   (`neighbor swpXX type unnumbered`), `peer-group hbn remote-as external`,
   `path-selection multipath aspath-ignore on`, redistribute connected/static,
-  leaf AS `65001`, loopback `11.0.0.101/32`. (Written for NVIDIA Spectrum /
+  leaf AS `65001`, loopback `11.0.0.111/32`. (Written for NVIDIA Spectrum /
   Cumulus Linux — translated to Cisco NX-OS in §5.)
 
 **[R3] DPF HBN use-case guide — "Host Based Networking (HBN)"**
