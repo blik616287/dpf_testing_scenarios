@@ -152,14 +152,19 @@ Route A (unnumbered) needs **no /31s** — links use IPv6 link-local only.
 
 | Link | Leaf int | Leaf IP /31 | Host port (HBN) | Host IP /31 | Status |
 |---|---|---|---|---|---|
-| gpu1-p0 | `Eth1/23` | `172.16.97.240/31` | gpu1 p0 (`p0_if`) | `172.16.97.241/31` | **new** — convert from VLAN 497 access |
+| gpu1-p0 | `Eth1/23` | `172.16.97.240/31` | gpu1 p0 (`p0_if`) | `172.16.97.241/31` | **ACTIONED ✅** — routed /31 (was VLAN 497) |
 | gpu1-p1 | `Eth1/24` | `172.16.97.248/31` | gpu1 p1 (`p1_if`) | `172.16.97.249/31` | **existing — keep unchanged** |
-| gpu2-p0 | `Eth1/25` | `172.16.97.242/31` | gpu2 p0 (`p0_if`) | `172.16.97.243/31` | **new** — convert from VLAN 497 access |
+| gpu2-p0 | `Eth1/25` | `172.16.97.244/31` | gpu2 p0 (`p0_if`) | `172.16.97.245/31` | **ACTIONED ✅** — routed /31 (was VLAN 497) |
 | gpu2-p1 | `Eth1/26` | `172.16.97.250/31` | gpu2 p1 (`p1_if`) | `172.16.97.251/31` | **existing — keep unchanged** |
 
-Confirmed real state (custeng.leaf1.1): leaf ASN `65001`, leaf loopback
-`11.0.0.111`. The two `p1` /31s already exist and are kept verbatim; only the
-two `p0` links are new (suggested /31s above — adjust to fabric IPAM).
+**STATUS — ACTIONED 2026-05-18 ✅** All four uplinks are routed /31 with eBGP
+neighbors on `custeng.leaf1.1` (leaf ASN `65001`, loopback `11.0.0.111`). The
+two `p0` ports were converted from VLAN 497 access to routed, **confirmed from
+the DPU side via the leaf's LLDP/CDP** (VLAN 497 TLV gone; port-desc now
+"HBN ECMP L3"). Leaf `p0` neighbors `172.16.97.241`/`172.16.97.245` are `Active`,
+pending DPU-side HBN bring-up (Phase 6). The two `p1` /31s were kept verbatim.
+The `Vlan497` SVI + old ovnvtep neighbors remain until the four routed sessions
+are Established, then get removed (B3).
 
 **Routes the leaf will learn from each DPU:** the DPU loopback `/32`
 (`11.0.0.1`/`11.0.0.2`) and the OVN underlay subnets HBN redistributes — the
@@ -297,7 +302,7 @@ interface Ethernet1/25
   description L3-uplink-gpu2-p0-HBN
   no switchport
   mtu 9216
-  ip address 172.16.97.242/31
+  ip address 172.16.97.244/31
   no shutdown
 ```
 
@@ -323,7 +328,7 @@ router bgp 65001
   neighbor 172.16.97.249 remote-as 65010
     inherit peer HBN-DPU
     description gpu1-p1
-  neighbor 172.16.97.243 remote-as 65020
+  neighbor 172.16.97.245 remote-as 65020
     inherit peer HBN-DPU
     description gpu2-p0
   neighbor 172.16.97.251 remote-as 65020
@@ -411,11 +416,11 @@ ping 11.0.0.2 packet-size 8972 df-bit count 5
 ```
 ping 172.16.97.241 source 172.16.97.240 packet-size 8972 df-bit count 5   ! gpu1-p0 (new),      expect 5/5
 ping 172.16.97.249 source 172.16.97.248 packet-size 8972 df-bit count 5   ! gpu1-p1 (existing /31)
-ping 172.16.97.243 source 172.16.97.242 packet-size 8972 df-bit count 5   ! gpu2-p0 (new)
+ping 172.16.97.245 source 172.16.97.244 packet-size 8972 df-bit count 5   ! gpu2-p0 (new)
 ping 172.16.97.251 source 172.16.97.250 packet-size 8972 df-bit count 5   ! gpu2-p1 (existing /31)
 show ip bgp summary                          ! 4 neighbors, State/PfxRcd = a number (not Idle/Active)
 show ip route 11.0.0.1                        ! gpu1 loopback — ECMP: next-hops via .241 + .249
-show ip route 11.0.0.2                        ! gpu2 loopback — ECMP: next-hops via .243 + .251
+show ip route 11.0.0.2                        ! gpu2 loopback — ECMP: next-hops via .245 + .251
 show forwarding ipv4 route 11.0.0.1
 ```
 
@@ -470,7 +475,7 @@ p1 (Eth1/24, Eth1/26) returns to its pre-change state. TCAM `ing-sup` carving
    fabric ASNs **65010 / 65020** (already live on the `p1` sessions). Confirm no
    collision.
 7. **IP block (Route B)** — two free /31s for the **new p0 links** (doc
-   suggests `172.16.97.240/31` + `172.16.97.242/31`); the p1 /31s
+   suggests `172.16.97.240/31` + `172.16.97.244/31`); the p1 /31s
    (`172.16.97.248`/`.250`) are kept unchanged.
 8. **Jumbo MTU** — confirm `mtu 9216` applies on routed Eth1/23 & 1/25 (1/24 &
    1/26 already 9216), or apply the platform jumbo policy first.
