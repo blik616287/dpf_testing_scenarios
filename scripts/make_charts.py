@@ -48,6 +48,8 @@ HBN = {
     # UDP receiver loss %
     "loss-iperf3-udp-max": (41.66, 6.67), "loss-iperf3-udp-64b": (12.43, 2.66),
     "loss-iperf3-udp-1400b": (8.12, 1.65),
+    # sockperf UDP ping-pong p99.9 (us) — added 2026-05-26 (real measurement, n=4 runs 2-5)
+    "sockperf-p999": (132.85, 1.97),
 }
 def hbn_m(k):  # mean
     v = HBN.get(k); return v[0] if isinstance(v, tuple) else NA
@@ -194,24 +196,28 @@ fig.tight_layout(rect=[0,0.03,1,1])
 fig.savefig(f"{OUT}/transactions.png")
 plt.close(fig)
 
-# ── 3. tail latency (3-way: sockperf p99.9 — no comparable HBN metric) ────────
-fig, ax = plt.subplots(figsize=(8, 5.6))
+# ── 3. tail latency (4-way: sockperf UDP ping-pong p99.9, incl. HBN) ──────────
+fig, ax = plt.subplots(figsize=(9, 5.8))
 a=stats(collect("sockperf-pingpong",CIL,sockperf_p999))
 b=stats(collect("sockperf-pingpong",OFF,sockperf_p999))
 c=stats(collect("sockperf-pingpong",ON,sockperf_p999))
-xs=np.arange(3)
-bars=ax.bar(xs,[a[0],b[0],c[0]],0.55,yerr=[a[1],b[1],c[1]],capsize=6,
-            color=[COL_C,COL_S,COL_H],edgecolor=EDGE)
+h=(hbn_m("sockperf-p999"), hbn_e("sockperf-p999"))
+xs=np.arange(4)
+means=[a[0],b[0],c[0],h[0]]
+errs=[a[1],b[1],c[1],h[1]]
+bars=ax.bar(xs,means,0.55,yerr=errs,capsize=6,
+            color=[COL_C,COL_S,COL_H,COL_HBN],edgecolor=EDGE)
 ax.set_yscale("log")
 ax.set_xticks(xs)
-ax.set_xticklabels(["Cilium\n(host kernel)","VPC-OVN sw\n(hw-offload=false)","VPC-OVN HW\n(hw-offload=true)"])
+ax.set_xticklabels(["Cilium\n(host kernel)","VPC-OVN sw\n(hw-offload=false)","VPC-OVN HW\n(hw-offload=true)","DPF + HBN\n(MTU 9000)*"])
 ax.set_ylabel("p99.9 round-trip latency (µs, log scale)")
-ax.set_title("Tail Latency (sockperf ping-pong p99.9)")
+ax.set_title("Tail Latency (sockperf UDP ping-pong, p99.9 over 5×60 s, n=4)")
 ax.grid(axis="y",linestyle="--",alpha=0.4,which="both")
-for b_,m in zip(bars,[a[0],b[0],c[0]]):
+for b_,m in zip(bars,means):
+    if m is None or m == 0: continue
     ax.text(b_.get_x()+b_.get_width()/2,b_.get_height()*1.05,f"{m:.0f} µs",
             ha="center",va="bottom",fontsize=11)
-footnote(fig, "DPF+HBN: sockperf image unavailable; netperf p99 was ~97 µs (TCP_RR) / ~92 µs (UDP_RR) — see report §7. Not plotted (different metric: p99 vs p99.9).")
+footnote(fig, HBN_NOTE)
 fig.tight_layout(rect=[0,0.04,1,1])
 fig.savefig(f"{OUT}/tail_latency.png")
 plt.close(fig)

@@ -410,7 +410,7 @@ flowchart TB
 
 > **Methodology vs §1–6 — now matched on sample strength.** The §7.2 / §7.7 / §7.8 numbers are **n=4 (runs 2–5), 60 s per run, 30 s idle between runs** — same as Test Sets 1–2. Remaining differences:
 > - **Pod placement:** host cluster, so iperf3's app CPU is host-side (%usr) — in T1/T2 the app ran on the DPU Arm and host mpstat saw only dataplane. The fair dataplane indicator is `%sys+%soft`, which is reported alongside busy%.
-> - **Tail latency:** netperf **p99** (sockperf image unavailable in this env) — vs sockperf **p99.9** in T1/T2.
+> - **Tail latency:** sockperf p99.9 captured (image `cerotyki/sockperf` with `LD_PRELOAD=""` to disable the image's broken `libgrwrap.so` preload; sockperf 3.7 server wrapped in a respawn loop so it survives between client runs). Apples-to-apples with T1/T2's sockperf p99.9.
 > - **CNI / profile:** OVN-K primary + HBN on `dpf-ovn-hbn` — vs Cilium-mgmt + VPC-OVN on `dpf-ovn-accelerated`.
 > - **Bench pods:** `networkstatic/iperf3` + `networkstatic/netperf`, default network `ovn-kubernetes/dpf-ovn-kubernetes`, one `nvidia.com/bf3-p0-vfs` each (client on gpu1, server on gpu2). The aggregation test (§ 7.4) used 1→8 concurrent pairs on separate VFs.
 
@@ -433,6 +433,7 @@ flowchart TB
 | UDP_RR | 66.2 ± 2.2 µs mean, **92.0 ± 1.6 µs p99**, 15 079 ± 485 trans/s |
 | TCP_CRR | 2 398 ± 8 conn/s |
 | TCP_STREAM (netperf, small msg) | 31.89 ± 0.27 Gbps |
+| **sockperf UDP ping-pong** | **64.6 ± 2.9 µs mean, 88.7 ± 1.4 µs p99, 132.85 ± 1.97 µs p99.9**, 277.5 ± 21.7 µs p99.99 |
 
 ### 7.3 ECMP scaling — single pod-pair (1→32 flows)
 | Flows | 1 | 2 | 4 | 8 | 16 | 32 |
@@ -473,6 +474,7 @@ HBN's value is **aggregate multi-uplink bandwidth**, demonstrated with **N concu
 | DPU Arm Δ vs idle (sys+soft) | n/a | (see §5.1) | **<1 %** (eswitch offload) |
 | TCP_RR transaction rate | 8 543 | 23 472 | **13 858** ← non-offload level (§ 7.9) |
 | TCP_CRR connection rate | 1 392 | 5 370 | **2 398** ← non-offload level (§ 7.9) |
+| **sockperf UDP p99.9 tail latency** | 963 µs | 104 µs | **132.85 ± 1.97 µs** (n=4) |
 
 > **On the single-stream row:** HBN's 36.6 Gbps reads higher than VPC-OVN's 27.1, but that gap is mostly methodological — T2's 27.1 ± **4.0** Gbps is the multi-stream-equivalent single TCP (one VF, one geneve tunnel, host-side window scaling under Cilium) with wide variance, while HBN's 36.6 ± 0.4 is a jumbo single stream with a larger TCP window over the offloaded SF path. Treat the comparison as "HBN is at least as good for one pair" rather than a +35 % silicon claim; the silicon win is already isolated in T2 (§5).
 
@@ -531,8 +533,9 @@ While HBN's bulk-throughput path is hardware-offloaded (37 Gbps single-pair line
 | TCP_RR (trans/s) | 8 543 | ~13 K | **23 472** | **13 858** |
 | TCP_CRR (conn/s) | 1 392 | — | **5 370** | **2 398** |
 | TCP_RR RTT       | 117 µs | ~77 µs | **43 µs** | **72 µs** |
+| **sockperf UDP p99.9** | **963 µs** | — | **104 µs** | **132.85 ± 1.97 µs** (n=4) |
 
-HBN's TCP_RR is **+29 µs over the VPC-OVN-HW arm** — essentially the gap between the two OVS-DOCA datapaths visible on the DPU eswitch:
+The HBN sockperf p99.9 sits **+29 µs over the VPC-OVN HW arm** — exactly the same gap seen in TCP_RR (43 → 72 µs), confirming a constant per-packet software-path overhead independent of transport (TCP vs UDP). The gap is the cost of OVS-DOCA's two coexisting datapaths visible on the DPU eswitch:
 
 - **`dp:doca, offloaded:yes`** (hardware eswitch path) — carries the large TCP flows; this is what hits line rate.
 - **`dp:ovs`** (software OVS-DOCA datapath on the Arm PMD cores) — carries the per-packet / control-touched traffic. In the HBN setup, the **br-ovn integration bridge flows** explicitly fall here, with `dp-offload-info: 'match unsupported: br-ovn: unable to get eswitch mgr port id'` reported per flow.
