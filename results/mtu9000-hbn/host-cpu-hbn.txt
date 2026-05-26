@@ -1,0 +1,14 @@
+=== T3/T4 — Host CPU under OVN+HBN line-rate load (MTU 9000) ===
+mpstat "Average: all" across 48 cores per host, % of total.
+NOTE: HBN bench pods run on the HOST cluster, so iperf3's app CPU is on the host
+(%usr). The dataplane-offload indicator is %sys + %soft, which stays low because
+encap/forward is on the DPU eswitch. (In T1/T2 the pods ran on the DPU tenant
+cluster, so the app CPU was on the DPU Arm and host mpstat saw only dataplane.)
+
+Idle baseline:        .90 usr=0.98 sys=0.64 soft=0.01 busy=2.90% | .253 usr=0.08 sys=0.05 soft=0.00 busy=0.13%
+Under load 8-stream  (~38 Gbps): .90 usr=0.86 sys=2.67 soft=1.63 busy=6.31% | .253 usr=0.18 sys=1.94 soft=2.13 busy=4.26%
+Under load 16-stream (~39 Gbps): .90 usr=0.76 sys=2.47 soft=1.84 busy=6.15% | .253 usr=0.17 sys=2.03 soft=2.25 busy=4.46%
+
+Summary: at line rate, host busy ~6% (client) / ~4.4% (server); ~4-5 pts net of idle.
+Dataplane (%sys+%soft) ~4%; %usr negligible. Comparable to VPC-OVN accelerated (~5%),
+far below passthrough (~21%). The DPU keeps host cores free under HBN too.

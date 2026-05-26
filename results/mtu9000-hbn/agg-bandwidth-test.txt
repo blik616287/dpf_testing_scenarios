@@ -1,0 +1,27 @@
+=== T3/T4 — 4-UPLINK BANDWIDTH AGGREGATION TEST (OVN+HBN, MTU 9000) ===
+Topology: 2 BlueField-3 DPUs, 2x 40 GbE uplinks each = 4 ECMP uplinks to leaf AS65001 (ethtool-confirmed 40 G — lab fabric is 40 G per limitation 7; BF-3 silicon supports 200 G/port).
+Method: N concurrent pod-pairs (client gpu1 -> server gpu2), each iperf3 -P 8, distinct VFs.
+
+Aggregate scaling curve:
+  1        36.29
+  2        70.13
+  4        76.31
+  6        69.73
+  8        77.98
+  => single-pair ~37 Gbit/s = per-VF/endpoint limit; plateau ~77 Gbit/s = per-DPU offload ceiling.
+
+8-pair peak run, per-pair:
+  pair1: 10.21 Gbit/s
+  pair2:  9.83 Gbit/s
+  pair3:  9.26 Gbit/s
+  pair4:  9.98 Gbit/s
+  pair5:  8.49 Gbit/s
+  pair6:  8.60 Gbit/s
+  pair7: 11.77 Gbit/s
+  pair8:  8.17 Gbit/s
+  AGGREGATE (8 pairs): 76.30 Gbit/s
+
+Per-uplink distribution at peak (byte delta, all 4 uplinks):
+  gpu1 (rx): p0=98.9 GB (51%)  p1=94.5 GB (49%)  total 193.4 GB
+  gpu2 (tx): p0=97.6 GB (50%)  p1=95.8 GB (50%)  total 193.4 GB
+  => all 4 uplinks actively carry balanced load = ECMP aggregation across both DPUs.

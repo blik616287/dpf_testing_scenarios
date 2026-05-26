@@ -1,0 +1,14 @@
+=== T3 — Per-uplink ECMP distribution (cross-node 16-flow, MTU 9000) ===
+Cross-node flow: iperf-client (gpu1/.90, 10.233.64.6) -> iperf-server (gpu2/.253, 10.233.66.4)
+Measured: tx_bytes_phy / rx_bytes_phy delta on physical uplinks p0,p1 over a 20s 16-flow run.
+iperf3 throughput during measurement: 37.15 Gbit/s (~94 GB moved in 20s).
+
+gpu1 (.29) active direction over p0/p1:  p0 = 47.10 GB (50.0%)   p1 = 47.12 GB (50.0%)
+gpu2 (.20) active direction over p0/p1:  p0 = 35.33 GB (37.5%)   p1 = 58.89 GB (62.5%)
+
+=> Both uplinks carry the load on BOTH DPUs = cross-node ECMP confirmed.
+   (gpu1 near-perfect 50/50; gpu2 37.5/62.5 hash distribution.)
+
+Cumulative since boot (corroborates sustained ECMP across all prior runs):
+  gpu1: p0 tx=1063.34 GB / p1 tx=1348.98 GB
+  gpu2: p0 rx=1146.30 GB / p1 rx=1243.53 GB
