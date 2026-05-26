@@ -1,8 +1,8 @@
 # Customer Summary — Corrections Before External Share
 
-Review of Ehud's customer-summary draft (DPF Pod-to-Pod Acceleration Benchmark Report) against the source report at `BENCHMARK_REPORT.md` on `main`. **The numbers all check out.** Four corrections are needed before sharing externally — three are correctness fixes, one is nice-to-have polish that strengthens credibility.
+Review of Ehud's customer-summary draft (DPF Pod-to-Pod Acceleration Benchmark Report) against the source report at `BENCHMARK_REPORT.md` on `main`. **The numbers all check out.** One release-blocker correction remains; **items 2 and 3 from the original review have been resolved by running sockperf UDP on HBN**, so the draft should be updated with the real data shown below.
 
-> **Release-blocker:** item 1 (an internal contradiction with our own § 7.8 / § 7.9). Items 2–3 are smaller but should be fixed in the same pass. Items 4–6 are polish — strongly recommended but won't actively mislead anyone if left.
+> **Release-blocker:** item 1 (an internal contradiction with our own § 7.8 / § 7.9). Items 2 & 3 are now data-supply items (new measurements available — use them). Items 4–6 are polish — strongly recommended but won't actively mislead anyone if left.
 
 ---
 
@@ -28,52 +28,27 @@ This is accurate and harmonises with the RR/CRR caveat that follows.
 
 ---
 
-## 2. Three-way table — apples-to-oranges in the tail-latency row
+## 2. RESOLVED — sockperf UDP p99.9 now measured for HBN
 
-**Where:** "Three-Way Comparison" table.
+**Original concern:** the three-way table mixed sockperf p99.9 (T1/T2) with netperf p99 (HBN) in the same cell.
 
-**Draft has:**
+**Update:** we re-ran sockperf UDP ping-pong on the HBN cluster matching the T1/T2 methodology exactly (5 × 60 s, n=4 over runs 2-5, ~900K samples per run). The image-pull blocker that drove the original netperf-p99 substitution was solved by side-loading `docker.io/cerotyki/sockperf:latest` with `LD_PRELOAD=""` to disable its broken `libgrwrap.so` preload, and wrapping the server in a respawn loop. Real numbers, apples-to-apples:
 
-| Metric | Passthrough (A) | VPC-OVN HW (B) | OVN+HBN (B′) |
+| sockperf UDP ping-pong p99.9 (n=4) | Passthrough (A) | VPC-OVN HW (B) | **OVN+HBN (B′)** |
 |---|---:|---:|---:|
-| Tail latency p99.9 | 963 µs | 104 µs | ~97 µs (p99) |
+| | 963 µs | 104 µs | **132.85 ± 1.97 µs** |
 
-**Why it's a problem:** the first two cells are **sockperf p99.9**; the HBN cell is **netperf p99** — a smaller percentile from a different tool. (sockperf wasn't pullable in our HBN env, so netperf p99 was used as a substitute — see report § 7.0 methodology box.) At a glance a customer will read this as "HBN tail latency ≈ VPC-OVN HW," which isn't a fair comparison.
+**Suggested fix:** replace the mixed "~97 µs (p99)" cell in the three-way table with **`132.85 ± 1.97 µs (sockperf UDP p99.9, n=4)`**. Now strictly apples-to-apples.
 
-**Suggested fix (either option works):**
-
-**Option A — drop HBN cell + footnote:**
-
-| Metric | Passthrough (A) | VPC-OVN HW (B) | OVN+HBN (B′) |
-|---|---:|---:|---:|
-| sockperf p99.9 tail latency | 963 µs | 104 µs | n/a¹ |
-
-> ¹ HBN not measured at p99.9 (sockperf image unavailable). For reference, netperf TCP_RR p99 on HBN was 97 µs.
-
-**Option B — split into two rows:**
-
-| Metric | Passthrough (A) | VPC-OVN HW (B) | OVN+HBN (B′) |
-|---|---:|---:|---:|
-| sockperf p99.9 tail latency | 963 µs | 104 µs | — (not measured) |
-| netperf TCP_RR p99 | — | — | 97 µs |
-
-Either keeps each row comparing within a single metric.
+Raw data is in `results/mtu9000-hbn/sockperf-udp/` (5 run files + SUMMARY.md). HBN sits **+29 µs over the VPC-OVN HW arm** — the same +29 µs gap seen in TCP_RR (43 → 72 µs), confirming a constant per-packet software-path overhead from the OVN+HBN `dp:ovs` fallback (§ 7.9). The chart `results/charts/tail_latency.png` has been regenerated with the HBN 4th bar.
 
 ---
 
-## 3. Methodology lists "sockperf" — not used on HBN
+## 3. RESOLVED — sockperf was used on HBN
 
-**Where:** "Methodology Highlights" → tools bullet.
+**Original concern:** the Methodology Highlights bullet listed sockperf as a tool used in all arms; in the original measurement sockperf was only run on T1/T2.
 
-**Draft says:**
-
-> Tools: iperf3, netperf, sockperf, mpstat — all running inside pod containers
-
-**Why it's a problem:** sockperf only ran on T1/T2 (DPU tenant cluster pods). For HBN, the sockperf image was not pullable in our environment, so netperf TCP_RR p99 was used instead. The summary as written implies sockperf data exists for HBN.
-
-**Suggested fix:**
-
-> Tools: iperf3, netperf, mpstat (all arms); sockperf p99.9 (T1/T2 only — image unavailable for HBN, netperf p99 used in its place)
+**Update:** sockperf UDP ping-pong has now been run on HBN as well (see item 2). The methodology bullet can stay as written: **"Tools: iperf3, netperf, sockperf, mpstat — all running inside pod containers."** No fix needed beyond using the new sockperf-p99.9 numbers in the table.
 
 ---
 
@@ -132,15 +107,14 @@ These items are all accurate and well-handled — no change needed:
 
 ---
 
-## Suggested reply skeleton
+## Suggested reply skeleton (updated)
 
-> Hi Ehud — thanks for the great summary, it tracks the report closely. Before we share externally, four small corrections that need to land first (one is a contradiction with a caveat later in the same summary, so worth catching):
+> Hi Ehud — thanks for the great summary, it tracks the report closely. One release-blocker correction and one data update before we share externally, plus three optional polish items:
 >
-> 1. Change "(hardware eswitch does the work)" → "(no incremental Arm CPU under bench load)" — aligns with § 7.8 of the report and removes the contradiction with the RR/CRR caveat in the next paragraph.
-> 2. In the three-way table, the HBN "tail latency" cell is netperf p99 (different metric from the sockperf p99.9 used for A and B). Either drop the HBN cell with a footnote, or split into two rows.
-> 3. The Methodology bullet lists sockperf as a tool used in all arms; it was only run on T1/T2.
-> 4. (Optional polish) One line noting pod placement differs (T1/T2 on DPU tenant; HBN on host), so the fair host-CPU comparison is `%sys+%soft` (≈4 % both for VPC-OVN HW and HBN).
+> 1. **Must-fix:** change "(hardware eswitch does the work)" → "(no incremental Arm CPU under bench load)" on the DPU Arm CPU bullet — aligns with § 7.8 and removes the contradiction with the RR/CRR caveat in the next paragraph.
+> 2. **Data update:** we re-ran sockperf UDP ping-pong on HBN (5 × 60 s, n=4, ~900K samples/run). Real p99.9 = **132.85 ± 1.97 µs**. Please replace the "~97 µs (p99)" cell in the three-way table with **132.85 ± 1.97 µs (sockperf UDP p99.9, n=4)** — now strictly apples-to-apples with the T1/T2 sockperf p99.9 numbers. The chart `results/charts/tail_latency.png` and report § 7 / § 7.6 / § 7.9 have been updated to match.
+> 3. **Polish (optional):** one line noting pod placement differs (T1/T2 on DPU tenant; HBN on host) — the fair host-CPU comparison is `%sys+%soft` (≈4 % both for VPC-OVN HW and HBN), which actually *strengthens* the "on par" claim. Two more small polish items in the doc.
 >
-> With those four, I'm comfortable sharing.
+> With items 1 and 2, I'm comfortable sharing.
 
-Full detail and verbatim text for each fix is in `CUSTOMER_SUMMARY_CORRECTIONS.md` on the repo's main branch.
+Full breakdown including the source citations and verbatim suggested text is in `CUSTOMER_SUMMARY_CORRECTIONS.md` on the repo's main branch.

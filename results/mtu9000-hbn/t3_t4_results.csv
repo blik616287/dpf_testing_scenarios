@@ -22,6 +22,12 @@ dpf-ovn-hbn,T4-matrix-v2,udp_rr_mean,-,66.22,2.18,us,4,
 dpf-ovn-hbn,T4-matrix-v2,udp_rr_p99,-,92.00,1.63,us,4,
 dpf-ovn-hbn,T4-matrix-v2,udp_rr_rate,-,15079,485,trans/s,4,
 dpf-ovn-hbn,T4-matrix-v2,tcp_crr_rate,-,2398,8,conn/s,4,
+dpf-ovn-hbn,T4-sockperf-udp,mean_us,-,64.61,2.85,us,4,sockperf 3.7 cerotyki LD_PRELOAD=
+dpf-ovn-hbn,T4-sockperf-udp,p50_us,-,64.56,2.90,us,4,
+dpf-ovn-hbn,T4-sockperf-udp,p90_us,-,73.00,1.03,us,4,
+dpf-ovn-hbn,T4-sockperf-udp,p99_us,-,88.70,1.41,us,4,
+dpf-ovn-hbn,T4-sockperf-udp,p99_9_us,-,132.85,1.97,us,4,~900K samples per run
+dpf-ovn-hbn,T4-sockperf-udp,p99_99_us,-,277.49,21.66,us,4,
 dpf-ovn-hbn,T4-aggregation,aggregate,1pair,36.3,,Gbit/s,1,concurrent pod-pairs each -P8 20s
 dpf-ovn-hbn,T4-aggregation,aggregate,2pair,70.1,,Gbit/s,1,
 dpf-ovn-hbn,T4-aggregation,aggregate,4pair,76.3,,Gbit/s,1,
