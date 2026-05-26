@@ -471,6 +471,8 @@ HBN's value is **aggregate multi-uplink bandwidth**, demonstrated with **N concu
 | Multi-pair aggregate (4 uplinks) | n/a (single path) | n/a (single path) | **~77 Gbps** |
 | Host CPU at line rate (sys+soft) | 21 % | ~5 % | **~4 %** |
 | DPU Arm Δ vs idle (sys+soft) | n/a | (see §5.1) | **<1 %** (eswitch offload) |
+| TCP_RR transaction rate | 8 543 | 23 472 | **13 858** ← non-offload level (§ 7.9) |
+| TCP_CRR connection rate | 1 392 | 5 370 | **2 398** ← non-offload level (§ 7.9) |
 
 > **On the single-stream row:** HBN's 36.6 Gbps reads higher than VPC-OVN's 27.1, but that gap is mostly methodological — T2's 27.1 ± **4.0** Gbps is the multi-stream-equivalent single TCP (one VF, one geneve tunnel, host-side window scaling under Cilium) with wide variance, while HBN's 36.6 ± 0.4 is a jumbo single stream with a larger TCP window over the offloaded SF path. Treat the comparison as "HBN is at least as good for one pair" rather than a +35 % silicon claim; the silicon win is already isolated in T2 (§5).
 
@@ -512,9 +514,34 @@ At line rate, **incremental host busy over idle ≈ 3–4 pts** (almost all in `
 | netperf TCP_CRR  | 8.11 / 0.83 % | 10.46 / 0.94 % |
 | netperf TCP_STREAM | 7.90 / 0.81 % | 8.07 / 0.91 % |
 
-**Headline:** DPU Arm busy% **under load is indistinguishable from idle** — load minus idle ≈ 0 across every test, and `%sys+%soft` stays **under 1 %**. The Arm is **not** moving the bench data; the eswitch silicon is. This is the cleanest possible demonstration of hardware offload: data crosses the DPU at line rate while the Arm cores remain at their control-plane baseline. (TCP_CRR sees a small bump on gpu2 — ~2 pts — from connection-setup churn on the server; still trivial.)
+**Headline:** DPU Arm busy% **under load is indistinguishable from idle** — load minus idle ≈ 0 across every test, and `%sys+%soft` stays **under 1 %**. For bulk throughput, data crosses the DPU at line rate while the Arm cores remain at their control-plane baseline. (TCP_CRR sees a small bump on gpu2 — ~2 pts — from connection-setup churn on the server; still trivial.)
 
-This complements §5.1 (Test Set 2 DPU Arm CPU). In T2 the bench pods *ran on the Arm*, so the Arm saw both the app and the dataplane; here the pods are host-cluster, so the Arm sees **only** the dataplane — which is essentially zero.
+This complements §5.1 (Test Set 2 DPU Arm CPU). In T2 the bench pods *ran on the Arm*, so the Arm saw both the app and the dataplane; here the pods are host-cluster, so the Arm sees **only** the dataplane.
+
+> **What the flat Arm CPU does and doesn't prove (read with § 7.9).** OVS-DOCA's PMD threads run in **poll mode** on isolated Arm cores at ~100 % regardless of traffic, so mpstat's "all"-average across 16 cores can't distinguish busy PMDs from idle traffic. The flat ~8 % therefore proves the Arm isn't burdened with *extra* per-packet work as load ramps — not that every packet goes through hardware. For RR/CRR specifically, see § 7.9.
+
+---
+
+### 7.9 Honest caveat — RR/CRR sits at the non-offload level
+
+While HBN's bulk-throughput path is hardware-offloaded (37 Gbps single-pair line rate, ~77 Gbps aggregate, no Arm CPU increment), the **round-trip / connection-rate path performs at the VPC-OVN-sw arm's level, not the VPC-OVN-HW arm's:**
+
+| Metric | Cilium (A) | VPC-OVN sw | VPC-OVN HW | **HBN** |
+|---|---:|---:|---:|---:|
+| TCP_RR (trans/s) | 8 543 | ~13 K | **23 472** | **13 858** |
+| TCP_CRR (conn/s) | 1 392 | — | **5 370** | **2 398** |
+| TCP_RR RTT       | 117 µs | ~77 µs | **43 µs** | **72 µs** |
+
+HBN's TCP_RR is **+29 µs over the VPC-OVN-HW arm** — essentially the gap between the two OVS-DOCA datapaths visible on the DPU eswitch:
+
+- **`dp:doca, offloaded:yes`** (hardware eswitch path) — carries the large TCP flows; this is what hits line rate.
+- **`dp:ovs`** (software OVS-DOCA datapath on the Arm PMD cores) — carries the per-packet / control-touched traffic. In the HBN setup, the **br-ovn integration bridge flows** explicitly fall here, with `dp-offload-info: 'match unsupported: br-ovn: unable to get eswitch mgr port id'` reported per flow.
+
+So although bulk packets ride the offload, **enough of the per-packet RR path touches the software datapath** to add the +29 µs RTT. This shows up in RR/CRR (small-packet, latency-dominated) but not in TCP throughput (large-packet, bandwidth-dominated) or in host CPU (the Arm software path is paid for by already-saturated PMD threads, not by host cores).
+
+**Workload guidance:**
+- For **throughput-sensitive / fleet-scale aggregation** workloads, HBN delivers full hardware-paced performance plus multi-uplink ECMP — clear win.
+- For **latency-sensitive / RPC-heavy microservices** (lots of small RR/CRR), the **VPC-OVN-HW arm (Test Set 1 cluster B / Test Set 2 HW-on)** is the right choice — its simpler flow chain (single geneve VLAN underlay, no HBN/ECMP route layer, no host-VF traversal) lets the whole per-packet path stay in the eswitch's offload table.
 
 ---
 
