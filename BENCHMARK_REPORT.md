@@ -613,7 +613,11 @@ Other reports / asks:
 └── TEST_CASES.md                           Higher-level TC1-TC4 scope (TC3/4 = HBN, complete — §7)
 ```
 
-## Appendix B — Reproducing the Comparison
+## Appendix B — Reproducibility (read this honestly)
+
+The two halves of this report had very different reproducibility profiles. Do **not** assume a green-field rerun will Just Work — the HBN half required a sustained manual rebuild and a long cascade of bug-fixes that are not encoded in any single script.
+
+### B.1 Test Set 1 / Test Set 2 (passthrough vs VPC-OVN, §§ 1–6) — mostly scripted
 
 ```bash
 # 1. Deploy cluster A (passthrough) and run baseline
@@ -627,8 +631,50 @@ python3 scripts/dpf_deploy.py create dpf-ovn-accelerated --hosts H1,H2
 # wait for cluster Running and pods bound to OVN (see §3.3 for manual binding), then:
 bash scripts/run_pod_accelerated.sh
 
-# 3. Generate charts and report
+# 3. Generate charts
 python3 scripts/make_charts.py
 ```
+
+Even here, **step 2 required the manual VPC-OVN pod-attach plumbing in § 3.3** (DPF v25.10.1's `vpc-ovn-node` doesn't auto-bind raw NAD-annotated pods) — the bash runner assumes those steps were performed first. The rest of the path was Palette-managed and reproducible.
+
+### B.2 Test Cases 3 & 4 (OVN+HBN, § 7) — **NOT reproducible from a single command**
+
+This dataset took multiple weeks of effort to produce. The published Palette `dpf-ovn-hbn` profile **did not deploy a working HBN cluster on this hardware**. Reaching the state described in § 7 required a hand-built rebuild off Palette and a long sequence of in-tree workarounds, each one independently load-bearing. None of it is captured by a `dpf_deploy.py create` call.
+
+A non-exhaustive list of issues that had to be diagnosed and worked around — every one of these was a hard blocker until it was fixed:
+
+- **DPF v25.10.1 BFB-URL concatenation bug** — Redfish ImageURI `bfb/?{bfb}?{bfcfg}` makes bfb-registry routing return "Unknown Host"; bypassed via manual rshim push / BMC multipart upload.
+- **rshim-forcer cronjob aborting BFB pushes mid-flight** — the every-2-min `SetRshim` cron restarts the BMC rshim service even when the value matches, killing in-progress transfers; must be suspended before any manual flash.
+- **DPU install-interface race** — hostagent nodemanager overwrites `DPUNode.installInterface` to `hostAgent`; in ZT mode this has to be patched back to `redfish` on the DPU status subresource.
+- **ZT kubeadm join token 2 h expiry** — token expires faster than the manual recovery loop; recovery is regenerate-and-`kubeadm join` via the DPU rshim console (or BMC SOL where rshim is wedged).
+- **DPUNode external-reboot annotation** — DPUNode external reboot blocks until the `dpunode-external-reboot-required` annotation is removed; no obvious indicator surfaces in the operator status.
+- **Palette OVN-K8s NodePort gateway defect** — broken pod egress *and* broken NodePort ingress (DPUs couldn't reach kamaji `172.16.30.240:30929` to join the tenant cluster). Fixed durably by moving `enp129s0f0` directly onto OVS `brbr-dpu` + setting `external-ids:bridge-uplink=enp129s0f0` and restarting `ovnkube-node` (the correct DS selector is `app.kubernetes.io/component=ovnkube-node`, *not* `app=ovnkube-node` — that one silently matches nothing).
+- **Both-node dpu-host blocker** — `.90` couldn't be a dpu-host (kamaji + local-path-etcd live there → circular deadlock). Worked around by running kamaji in a **KVM VM** (`dpf-ctrl .91`) bridged via a spare NIC (`enp129s0f1/br-vm`, deliberately *not* the OVN gateway `brbr-dpu`).
+- **`.240` tenant-API VIP plumbing** — on a dpu-host, OVN does *not* DNAT the NodePort VIP. Got working with: OpenFlow ARP-responder for .240 on `brbr-dpu` + `priority=1100,tcp,nw_dst=.240,tp_dst=30929,actions=LOCAL` + iptables PREROUTING DNAT to `.91:30929` + POSTROUTING MASQUERADE, with **`.240` deliberately not a kernel IP** (kernel-local would short-circuit through local-input and skip nat). Lives as `vip240-arp.service` (+ `/usr/local/sbin/vip240-arp.sh`) and `vip240-proxy.service` on `.90`.
+- **DPU oob unicast dead** — `br-comm-ch /24` (metric 0) shadowed `oob_net0` /24 (DHCP metric 100); fixed by adjusting metrics + removing a duplicate `.90/24` from the kernel `br-dpu`.
+- **OVN zone mismatch ("configured zone global" ≠ NBDB per-node zone)** — `get_node_zone` queries the *host* apiserver for the DPU node name + label `k8s.ovn.org/zone-name`. The DPF-operator-managed ghost Node objects had decayed (operator scaled 0/0). Recovered by `kubectl apply`'ing the per-DPU ghost Node objects with the right zone labels AND refreshing the expired `ovn-dpu` SA token: `kubectl create token ovn-dpu -n dpf-operator-system --duration=2160h` then base64'd into the tenant `ovn-dpu` Secret `TOKEN_FILE`.
+- **DPU components hard-coded to in-cluster ClusterIP** — cniprovisioner, flannel, and DPU-side multus all used `10.96.0.1:443` (or host's `10.233.0.1:443`) which is unreachable from this setup. Worked around with `KUBERNETES_SERVICE_HOST=172.16.30.240 PORT=30929` env injection on each DS, plus `sed` on the multus kubeconfig.
+- **Host `.253` ovnkube-node renames** — VF `enp14s0f0v1` had to be renamed to `enp14s0f0np0v1` (dpu-host ovnkube hardcodes the new name) and the host PF0 had to be given `10.0.120.2/29` via `dhcpcd` (the DPU cniprovisioner serves DHCP on it; `dhclient` isn't installed on the host).
+- **Pod MTU comes from the HOST-cluster OVN ConfigMap**, not the tenant — `ovn-kubernetes-config.mtu` must be set to 8940 (for MTU-9000 jumbo) and host `cluster-manager` + `node-dpu-host` must be restarted before pods get the new MTU.
+- **HBN pod malformed networks annotation after reboot** — the injection webhook can produce `name:invalid-network,namespace:invalid-namespace` as the first networks entry → multus fails with "cannot find NAD invalid-network" → BGP drops. Fix: `kubectl patch pod <doca-hbn> --type merge` the `k8s.v1.cni.cncf.io/networks` annotation to the correct form (iprequest `ip_lo`/`ip_pf2dpu2` + `mybrhbn` for `p0_if`/`p1_if`/`pf2dpu2_if`, all `namespace:dpf-operator-system`, SF cni-args `mtu:9216`).
+- **DPU clock skew** — `gpu1` came back ~9.5 h off NTP after a reboot, breaking SA-token auth and the zone-name read; reboot didn't fix it (no NTP on the DPU). Recovered via IPMI SOL on the BMC + `date -s @<host_epoch>; hwclock -w; systemctl restart kubelet`.
+- **Non-durable boot state on DPUs** — `oob_net0` is link-down at first boot, so `network-online.target` never fires, so none of the bf.cfg services run (bootstrap-dpf, ovs-config, kubeadm-join, netplan-apply). The expected ZT host power-cycle would unstick this; absent host IPMI, we hand-walked each step. A `dpf-runtime-fixup.service` was installed to allocate hugepages (3072 × 2 MB) + bring `oob_net0` up at sysinit, plus a `dpf-brdpu-shim.service` on `.90`, but **none of this is reboot-verified**.
+
+The cumulative effect: § 7's `dpf-ovn-hbn` cluster represents a specific, manually-curated state. It is not currently re-creatable by any single tool, script, or recipe in this repo.
+
+### B.3 What can be re-run today
+
+Once the §7 cluster is *standing*, the matrix itself **is** reproducible — the runners are in `/tmp/matrix_v2.sh` on `.90`, the parser is `/tmp/parse_m2.py`, and 4-node mpstat capture is straightforward. The artifacts in `results/mtu9000-hbn/matrix_v2/` (50 run files + 4 mpstat traces + timing log + parsed summary) were produced by exactly that flow.
+
+### B.4 What would be needed for true reproducibility
+
+A real "reproducing § 7" story requires either:
+
+1. The published Palette `dpf-ovn-hbn` profile to be fixed end-to-end (BFB-URL bug, ZT join-token TTL, install-interface race, OVN-K NodePort gateway, OVN ghost-Node + `ovn-dpu` token lifecycle, MTU plumbing across host/tenant), or
+2. A bespoke ansible / kustomize pipeline that encodes every workaround listed in B.2 as deliberate, idempotent steps — i.e. lifting our memory-resident runbook into in-tree automation.
+
+Neither exists today. If a customer is given § 7's numbers, give them § B.2 alongside. Even **with** this runbook in hand, budget realistically: in our case reproducing the § 7 state cost on the order of **40–80 engineer-hours** of console/SSH/BMC time, plus substantial LLM-agent token spend driving the diagnosis loops (the workarounds in § B.2 were not arrived at on the first try — most required failed-deploy → diagnose → retry cycles). Greenfield, without the workaround catalog, the cost is materially higher.
+
+---
 
 All paths and IPs in the runner scripts are hard-coded for the lab inventory in [`memory/env_details.md`](.claude/projects/-home-ubuntu-dpf-testing-scenarios/memory/env_details.md). Edit before running on a different inventory.
