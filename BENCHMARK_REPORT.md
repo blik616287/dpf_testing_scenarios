@@ -260,6 +260,8 @@ Once steps 6 & 7 land, traffic from the pod's net1 enters the DPU's br-int with 
 - **UDP sender (max bandwidth)**: VPC-OVN +160 %. The DPU's hardware path can transmit UDP much faster than the host kernel.
 - **UDP 1400 B and 64 B sender**: similar +168–171 % gains. TX-side offload is doing real work.
 
+> **Note on the HBN bar (UDP max ~16 Gbps vs VPC-OVN ~24).** The gap is a *sender-side* artifact of pod placement, not the fabric. HBN bench pods are host-cluster: a single-threaded `iperf3 -u -b 0` sends through one host SR-IOV VF TX queue serviced by one CPU softirq core, which caps the host x86 kernel UDP-send path at ~16 Gbps. T1/T2 pods ran on the DPU Arm via the leaner SF representor path (~24 Gbps single-thread). Both are receiver-bound anyway (§ 4.2) — HBN's 42 % loss and T2's ~50 % loss leave their effective received rates much closer than the sender bars suggest.
+
 ### 4.2 UDP loss explained
 
 ![UDP send vs loss](results/charts/udp_split.png)
