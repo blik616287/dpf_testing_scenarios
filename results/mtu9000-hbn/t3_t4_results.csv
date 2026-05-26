@@ -1,0 +1,59 @@
+cluster,test,metric,flows_or_size,value,stdev,unit,n,notes
+dpf-ovn-hbn,T4-ecmp-scaling,throughput,1,34.2,,Gbit/s,2,single pod-pair flows mean runs2-3 (older 20s data)
+dpf-ovn-hbn,T4-ecmp-scaling,throughput,2,35.5,,Gbit/s,2,
+dpf-ovn-hbn,T4-ecmp-scaling,throughput,4,36.1,,Gbit/s,2,
+dpf-ovn-hbn,T4-ecmp-scaling,throughput,8,36.9,,Gbit/s,2,
+dpf-ovn-hbn,T4-ecmp-scaling,throughput,16,37.1,,Gbit/s,2,
+dpf-ovn-hbn,T4-ecmp-scaling,throughput,32,36.3,,Gbit/s,2,endpoint-bound single-pair
+dpf-ovn-hbn,T4-matrix-v2,tcp_1stream_iperf3,1,36.63,0.40,Gbit/s,4,n=4 runs2-5 60s
+dpf-ovn-hbn,T4-matrix-v2,tcp_8stream,8,36.96,0.44,Gbit/s,4,n=4 60s
+dpf-ovn-hbn,T4-matrix-v2,tcp_16stream,16,36.80,0.65,Gbit/s,4,n=4 60s
+dpf-ovn-hbn,T4-matrix-v2,tcp_stream_netperf,1,31.89,0.27,Gbit/s,4,small msg
+dpf-ovn-hbn,T4-matrix-v2,udp_max_send,-,16.21,0.38,Gbit/s,4,
+dpf-ovn-hbn,T4-matrix-v2,udp_max_loss,-,41.66,6.67,percent,4,
+dpf-ovn-hbn,T4-matrix-v2,udp_1400_send,1400,4.40,0.04,Gbit/s,4,
+dpf-ovn-hbn,T4-matrix-v2,udp_1400_loss,1400,8.12,1.65,percent,4,
+dpf-ovn-hbn,T4-matrix-v2,udp_64_send,64,0.227,0.003,Gbit/s,4,
+dpf-ovn-hbn,T4-matrix-v2,udp_64_loss,64,12.43,2.66,percent,4,
+dpf-ovn-hbn,T4-matrix-v2,tcp_rr_mean,-,72.05,2.07,us,4,
+dpf-ovn-hbn,T4-matrix-v2,tcp_rr_p99,-,97.25,1.50,us,4,
+dpf-ovn-hbn,T4-matrix-v2,tcp_rr_rate,-,13858,390,trans/s,4,
+dpf-ovn-hbn,T4-matrix-v2,udp_rr_mean,-,66.22,2.18,us,4,
+dpf-ovn-hbn,T4-matrix-v2,udp_rr_p99,-,92.00,1.63,us,4,
+dpf-ovn-hbn,T4-matrix-v2,udp_rr_rate,-,15079,485,trans/s,4,
+dpf-ovn-hbn,T4-matrix-v2,tcp_crr_rate,-,2398,8,conn/s,4,
+dpf-ovn-hbn,T4-aggregation,aggregate,1pair,36.3,,Gbit/s,1,concurrent pod-pairs each -P8 20s
+dpf-ovn-hbn,T4-aggregation,aggregate,2pair,70.1,,Gbit/s,1,
+dpf-ovn-hbn,T4-aggregation,aggregate,4pair,76.3,,Gbit/s,1,
+dpf-ovn-hbn,T4-aggregation,aggregate,6pair,69.7,,Gbit/s,1,
+dpf-ovn-hbn,T4-aggregation,aggregate,8pair,78.0,,Gbit/s,1,fabric ceiling = 2x40GbE
+dpf-ovn-hbn,T4-aggregation,uplink_gpu1_p0_pct,8pair,51,,percent,1,
+dpf-ovn-hbn,T4-aggregation,uplink_gpu1_p1_pct,8pair,49,,percent,1,
+dpf-ovn-hbn,T4-aggregation,uplink_gpu2_p0_pct,8pair,50,,percent,1,
+dpf-ovn-hbn,T4-aggregation,uplink_gpu2_p1_pct,8pair,50,,percent,1,
+dpf-ovn-hbn,T4-host-cpu,gpu1_busy_pct,idle,2.76,,percent,3,pre-matrix baseline
+dpf-ovn-hbn,T4-host-cpu,gpu1_busy_pct,tcp_8stream,5.94,,percent,4,
+dpf-ovn-hbn,T4-host-cpu,gpu1_busy_pct,tcp_16stream,6.35,,percent,4,
+dpf-ovn-hbn,T4-host-cpu,gpu1_sys_soft_pct,tcp_8stream,3.97,,percent,4,dataplane indicator
+dpf-ovn-hbn,T4-host-cpu,gpu1_sys_soft_pct,tcp_16stream,4.26,,percent,4,
+dpf-ovn-hbn,T4-host-cpu,gpu2_busy_pct,idle,0.16,,percent,2,
+dpf-ovn-hbn,T4-host-cpu,gpu2_busy_pct,tcp_8stream,4.05,,percent,4,
+dpf-ovn-hbn,T4-host-cpu,gpu2_busy_pct,tcp_16stream,4.11,,percent,4,
+dpf-ovn-hbn,T4-host-cpu,gpu2_sys_soft_pct,tcp_8stream,3.85,,percent,4,
+dpf-ovn-hbn,T4-host-cpu,gpu2_sys_soft_pct,tcp_16stream,3.93,,percent,4,
+dpf-ovn-hbn,T4-dpu-cpu,gpu1_arm_busy_pct,idle,7.77,,percent,1,pre-matrix baseline
+dpf-ovn-hbn,T4-dpu-cpu,gpu1_arm_busy_pct,tcp_8stream,7.82,,percent,4,delta vs idle ~0
+dpf-ovn-hbn,T4-dpu-cpu,gpu1_arm_sys_soft_pct,tcp_8stream,0.78,,percent,4,dataplane <1% = HW offload
+dpf-ovn-hbn,T4-dpu-cpu,gpu2_arm_busy_pct,idle,8.49,,percent,35,
+dpf-ovn-hbn,T4-dpu-cpu,gpu2_arm_busy_pct,tcp_8stream,7.98,,percent,4,
+dpf-ovn-hbn,T4-dpu-cpu,gpu2_arm_sys_soft_pct,tcp_8stream,0.86,,percent,4,
+dpf-ovn-hbn,T3-ecmp-uplink,gpu1_p0_pct,16flow,50.0,,percent,1,cross-node 16-flow phy-byte delta
+dpf-ovn-hbn,T3-ecmp-uplink,gpu1_p1_pct,16flow,50.0,,percent,1,
+dpf-ovn-hbn,T3-ecmp-uplink,gpu2_p0_pct,16flow,37.5,,percent,1,
+dpf-ovn-hbn,T3-ecmp-uplink,gpu2_p1_pct,16flow,62.5,,percent,1,
+dpf-ovn-hbn,T3-bgp,sessions_established,-,4,,count,1,leaf AS65001 128 prefixes rcvd each
+dpf-ovn-hbn,T3-failover,throughput_single_uplink,-,36.3,,Gbit/s,1,p0_if BGP down p1 carries
+dpf-ovn-hbn,T3-failover,throughput_dual_uplink,-,39.0,,Gbit/s,1,
+dpf-ovn-hbn,T3-failover,retransmits_drop,-,250,,count,1,
+dpf-ovn-hbn,T3-failover,retransmits_rejoin,-,485,,count,1,
+dpf-ovn-hbn,T3-failover,retransmits_total,-,883,,count,1,

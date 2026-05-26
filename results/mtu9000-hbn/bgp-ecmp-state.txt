@@ -1,0 +1,159 @@
+############################################################
+## gpu1 (AS65010)  DPU 172.16.30.29  — 2026-05-26T01:09:23Z
+############################################################
+Warning: Permanently added '172.16.30.29' (ED25519) to the list of known hosts.
+sudo: unable to resolve host edge-7bf6f060000000000000ac1f6b24deb2-mt24326005fn: Temporary failure in name resolution
+
+IPv4 Unicast Summary (VRF default):
+BGP router identifier 11.0.0.1, local AS number 65010 vrf-id 0
+BGP table version 134
+RIB entries 259, using 57 KiB of memory
+Peers 2, using 40 KiB of memory
+Peer groups 1, using 64 bytes of memory
+
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc
+172.16.97.240   4      65001     25058     25094        0    0    0 20:54:11          128      130 N/A
+172.16.97.248   4      65001     25058     25094        0    0    0 20:54:11          128      130 N/A
+
+Total number of neighbors 2
+
+L2VPN EVPN Summary (VRF default):
+BGP router identifier 11.0.0.1, local AS number 65010 vrf-id 0
+BGP table version 0
+RIB entries 0, using 0 bytes of memory
+Peers 2, using 40 KiB of memory
+Peer groups 1, using 64 bytes of memory
+
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc
+172.16.97.240   4      65001     25058     25094        0    0    0 20:54:11        NoNeg    NoNeg N/A
+172.16.97.248   4      65001     25058     25094        0    0    0 20:54:11        NoNeg    NoNeg N/A
+
+Total number of neighbors 2
+
+############################################################
+## gpu2 (AS65020)  DPU 172.16.30.20  — 2026-05-26T01:09:24Z
+############################################################
+Warning: Permanently added '172.16.30.20' (ED25519) to the list of known hosts.
+sudo: unable to resolve host gpu-sm02-mt2439600dak: Temporary failure in name resolution
+
+IPv4 Unicast Summary (VRF default):
+BGP router identifier 11.0.0.0, local AS number 65020 vrf-id 0
+BGP table version 130
+RIB entries 259, using 57 KiB of memory
+Peers 2, using 40 KiB of memory
+Peer groups 1, using 64 bytes of memory
+
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc
+172.16.97.244   4      65001      3436      3443        0    0    0 02:51:41          128      130 N/A
+172.16.97.250   4      65001      3436      3443        0    0    0 02:51:41          128      130 N/A
+
+Total number of neighbors 2
+
+L2VPN EVPN Summary (VRF default):
+BGP router identifier 11.0.0.0, local AS number 65020 vrf-id 0
+BGP table version 0
+RIB entries 0, using 0 bytes of memory
+Peers 2, using 40 KiB of memory
+Peer groups 1, using 64 bytes of memory
+
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc
+172.16.97.244   4      65001      3436      3443        0    0    0 02:51:41        NoNeg    NoNeg N/A
+172.16.97.250   4      65001      3436      3443        0    0    0 02:51:41        NoNeg    NoNeg N/A
+
+Total number of neighbors 2
+
+
+===== gpu1 ECMP multipath sample (BGP-learned routes with 2 nexthops) =====
+B>* 10.0.120.0/29 [20/0] via 172.16.97.240, p0_if, weight 1, 02:51:49
+  *                      via 172.16.97.248, p1_if, weight 1, 02:51:49
+B>* 10.10.10.0/23 [20/0] via 172.16.97.240, p0_if, weight 1, 20:54:19
+  *                      via 172.16.97.248, p1_if, weight 1, 20:54:19
+B>* 10.16.1.0/30 [20/0] via 172.16.97.240, p0_if, weight 1, 20:54:19
+  *                     via 172.16.97.248, p1_if, weight 1, 20:54:19
+B>* 11.0.0.0/32 [20/0] via 172.16.97.240, p0_if, weight 1, 02:51:49
+  *                    via 172.16.97.248, p1_if, weight 1, 02:51:49
+B>* 11.0.0.111/32 [20/0] via 172.16.97.240, p0_if, weight 1, 20:54:19
+  *                      via 172.16.97.248, p1_if, weight 1, 20:54:19
+B>* 11.0.0.112/32 [20/0] via 172.16.97.240, p0_if, weight 1, 20:54:19
+  *                      via 172.16.97.248, p1_if, weight 1, 20:54:19
+B>* 172.16.10.0/24 [20/0] via 172.16.97.240, p0_if, weight 1, 20:54:19
+  *                       via 172.16.97.248, p1_if, weight 1, 20:54:19
+B>* 172.16.20.0/24 [20/0] via 172.16.97.240, p0_if, weight 1, 20:54:19
+  *                       via 172.16.97.248, p1_if, weight 1, 20:54:19
+B>* 172.16.30.0/24 [20/0] via 172.16.97.240, p0_if, weight 1, 20:54:19
+  *                       via 172.16.97.248, p1_if, weight 1, 20:54:19
+----- gpu1 nexthop-group (ECMP install) -----
+ID: 12 (zebra)
+     Valid, Installed, Initial Delay
+ID: 13 (zebra)
+     Valid, Installed, Initial Delay
+ID: 14 (zebra)
+     Valid, Installed, Initial Delay
+ID: 15 (zebra)
+     Valid, Installed, Initial Delay
+ID: 16 (zebra)
+     Valid, Installed, Initial Delay
+ID: 17 (zebra)
+     Valid, Installed, Initial Delay
+ID: 18 (zebra)
+     Valid, Initial Delay
+ID: 19 (zebra)
+     Valid, Initial Delay
+ID: 20 (zebra)
+     Valid, Installed, Initial Delay
+ID: 21 (zebra)
+     Valid, Installed, Initial Delay
+
+===== gpu2 ECMP multipath sample (BGP-learned routes with 2 nexthops) =====
+B>* 10.0.120.8/29 [20/0] via 172.16.97.244, p0_if, weight 1, 02:51:50
+  *                      via 172.16.97.250, p1_if, weight 1, 02:51:50
+B>* 10.10.10.0/23 [20/0] via 172.16.97.244, p0_if, weight 1, 02:51:50
+  *                      via 172.16.97.250, p1_if, weight 1, 02:51:50
+B>* 10.16.1.0/30 [20/0] via 172.16.97.244, p0_if, weight 1, 02:51:50
+  *                     via 172.16.97.250, p1_if, weight 1, 02:51:50
+B>* 11.0.0.1/32 [20/0] via 172.16.97.244, p0_if, weight 1, 02:51:50
+  *                    via 172.16.97.250, p1_if, weight 1, 02:51:50
+B>* 11.0.0.111/32 [20/0] via 172.16.97.244, p0_if, weight 1, 02:51:50
+  *                      via 172.16.97.250, p1_if, weight 1, 02:51:50
+B>* 11.0.0.112/32 [20/0] via 172.16.97.244, p0_if, weight 1, 02:51:50
+  *                      via 172.16.97.250, p1_if, weight 1, 02:51:50
+B>* 172.16.10.0/24 [20/0] via 172.16.97.244, p0_if, weight 1, 02:51:50
+  *                       via 172.16.97.250, p1_if, weight 1, 02:51:50
+B>* 172.16.20.0/24 [20/0] via 172.16.97.244, p0_if, weight 1, 02:51:50
+  *                       via 172.16.97.250, p1_if, weight 1, 02:51:50
+B>* 172.16.30.0/24 [20/0] via 172.16.97.244, p0_if, weight 1, 02:51:50
+  *                       via 172.16.97.250, p1_if, weight 1, 02:51:50
+----- gpu2 nexthop-group (ECMP install) -----
+ID: 12 (zebra)
+     Valid, Installed, Initial Delay
+ID: 13 (zebra)
+     Valid, Installed, Initial Delay
+ID: 14 (zebra)
+     Valid, Installed, Initial Delay
+ID: 15 (zebra)
+     Valid, Installed, Initial Delay
+ID: 16 (zebra)
+     Valid, Installed, Initial Delay
+ID: 17 (zebra)
+     Valid, Installed, Initial Delay
+ID: 18 (zebra)
+     Valid, Initial Delay
+ID: 19 (zebra)
+     Valid, Initial Delay
+ID: 20 (zebra)
+     Valid, Installed, Initial Delay
+ID: 21 (zebra)
+     Valid, Installed, Initial Delay
+
+===== Per-uplink cumulative counters (ECMP distribution) =====
+--- gpu1 p0_if / p1_if (rx/tx bytes) ---
+  gpu1 p0_if  rx=0.00 GB  tx=0.01 GB
+  gpu1 p1_if  rx=0.00 GB  tx=0.01 GB
+--- gpu2 p0_if / p1_if (rx/tx bytes) ---
+  gpu2 p0_if  rx=0.00 GB  tx=0.00 GB
+  gpu2 p1_if  rx=0.00 GB  tx=0.00 GB
+
+===== Per-uplink CUMULATIVE phy counters (since boot) — ECMP distribution =====
+gpu1 (client, tx-dominant): p0 tx=1063.34 GB  p1 tx=1348.98 GB
+gpu2 (server, rx-dominant): p0 rx=1146.30 GB  p1 rx=1243.53 GB
+Both uplinks carry ~balanced load on both DPUs => ECMP hashing across p0+p1 confirmed.
