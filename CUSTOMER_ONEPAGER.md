@@ -1,86 +1,63 @@
-# NVIDIA DPF on BlueField-3 — Pod-to-Pod Acceleration: Results at a Glance
+# NVIDIA DPF on BlueField-3 — Pod-to-Pod Networking: Results Summary
 
-**What was tested:** NVIDIA DPF v25.10.1 pod-to-pod networking on identical Supermicro servers with BlueField-3 DPUs over a 40 GbE fabric, across three configurations:
+**Setup:** NVIDIA DPF v25.10.1 on identical Supermicro servers with BlueField-3 DPUs, 40 GbE fabric. Four configurations measured, 11 benchmarks × 5 runs × 60 s each (run 1 = warmup; mean over runs 2–5, n=4); all tools (iperf3, netperf, sockperf, mpstat) run inside pods; hardware held constant across arms.
 
-| Configuration | Dataplane | Purpose |
+| Arm | Configuration | What it isolates |
 |---|---|---|
-| **A — Passthrough** | Cilium eBPF on the host kernel; DPU acts as a wire | Baseline (no DPU offload) |
-| **B — VPC-OVN Accelerated** | OVN offloaded to the DPU's OVS-DOCA engine | DPU acceleration value |
-| **B′ — OVN + HBN (ECMP)** | OVN offload + DOCA Host-Based Networking, BGP/ECMP over 4 uplinks | Multi-path aggregation + failover |
-
-Methodology: 11 benchmarks × 5 runs × 60 s (run 1 = warmup; mean over runs 2–5, n=4), all tools (iperf3, netperf, sockperf, mpstat) run inside pods. Hardware held constant across all arms.
-
-The data supports **two distinct comparisons** — both matter:
+| **Cilium** | Passthrough — Cilium eBPF on host kernel, DPU is a wire | Baseline (no DPU) |
+| **OVN hw-offload OFF** | OVN dataplane on the DPU, but in software (OVS-DOCA on Arm) | DPU placement, no silicon |
+| **OVN hw-offload ON** | OVN dataplane hardware-offloaded to the BlueField eswitch | Full DPU acceleration |
+| **OVN + HBN** | OVN offload + DOCA HBN, BGP/ECMP over 4 uplinks | Multi-path aggregation + failover |
 
 ---
 
-## 1. Full-stack value: host networking → DPU-accelerated (A → B)
+## Four-way results (n=4)
 
-*What you gain moving from a host-kernel CNI to DPU-offloaded OVN.*
+| Metric | Cilium | OVN hw-off | **OVN hw-on** | OVN + HBN |
+|---|---:|---:|---:|---:|
+| TCP single-stream (Gbps) | 20.5 | 18.3 | **27.1** | 36.6 |
+| TCP 8 / 16-stream (Gbps) | 39.4 | 15.7 | **39.4** | 36.8 |
+| UDP max send (Gbps)¹ | 9.2 | 22.6 | **23.9** | 16.2 |
+| TCP_RR (trans/s) | 8,543 | 16,244 | **23,472** | 13,858 |
+| UDP_RR (trans/s) | 10,154 | 17,161 | **26,834** | 15,079 |
+| TCP_CRR (conn/s) | 1,392 | 4,500 | **5,370** | 2,398 |
+| sockperf p99.9 latency (µs) | 327.7 | 108.7 | **63.9** | 132.9 |
+| sockperf p99.99 latency (µs) | 963 | 186 | **104** | 277.5 |
+| Host CPU at line rate² | 21 % | ~10 % | **~5 %** | ~6 % |
 
-| Metric | Passthrough (A) | VPC-OVN (B) | Improvement |
-|---|---:|---:|---:|
-| **Host CPU at line rate** | 21 % busy | ~5 % busy | **−77 %** |
-| **TCP request/response rate** | 8,543/s | 23,472/s | **+175 %** |
-| **TCP connection rate** | 1,392/s | 5,370/s | **+286 %** |
-| **Tail latency (sockperf p99.9)** | 963 µs | 104 µs | **−89 % (9×)** |
-| TCP single-stream | 20.5 Gbps | 27.1 Gbps | +33 % |
-| TCP 8/16-stream | 39.4 Gbps | 39.4 Gbps | tied (40 GbE wire limit*) |
+¹ UDP send-rate is sender-side; the single-threaded test receiver is the bottleneck in every arm, so effective received rate is lower. ² Host-CPU composition differs by pod placement (see Methodology); the dataplane indicator (`%sys`+`%soft`) is ~4 % for both OVN hw-on and HBN.
 
-> **The DPU does the dataplane work, freeing host CPU cores — while delivering faster transactions and dramatically tighter tail latency.** At line rate both arms saturate the wire, so the win is freed host cores + lower latency, not higher peak Gbps.
+**Two comparisons matter:**
 
-## 2. Isolating the silicon: hardware offload OFF → ON (apples-to-apples)
-
-*Same cluster, same CNI, same pods/IPs — only the `hw-offload` flag toggled. This isolates what the BlueField eswitch silicon contributes, independent of moving the dataplane to the DPU.*
-
-| Metric | OVN sw (offload off) | OVN HW (offload on) | Improvement |
-|---|---:|---:|---:|
-| **TCP 8 / 16-stream** | 15.7 Gbps | 39.4 Gbps | **+150 %** |
-| **Host CPU at line rate** | ~10 % busy | ~5 % busy | **−51 %** |
-| **Tail latency (sockperf p99.9)** | 186 µs | 104 µs | **−44 %** |
-| TCP single-stream | 18.3 Gbps | 27.1 Gbps | +48 % |
-| TCP_RR | 16,244/s | 23,472/s | +44 % |
-| UDP_RR | 17,161/s | 26,834/s | +56 % |
-| TCP_CRR | 4,500/s | 5,370/s | +19 % |
-| **DPU Arm efficiency** | 0.111 cores/Gbps | 0.064 cores/Gbps | **1.7× more bits/cycle** |
-
-> **The eswitch silicon is what makes OVN-on-DPU viable at line rate.** In pure software the DPU's OVS pipeline caps multi-stream throughput at ~15.7 Gbps; hardware offload uncaps it to the full 39.4 Gbps wire while *halving* host CPU and *cutting tail latency by 44 %* — and moves 1.7× more traffic per DPU Arm cycle. This is the silicon contribution, cleanly separated from the dataplane-relocation benefit in comparison #1.
+- **Full-stack value (Cilium → OVN hw-on):** host CPU **−77 %**, TCP_RR **+175 %**, TCP_CRR **+286 %**, p99.9 latency **−80 % (5.1×)**, p99.99 **−89 % (9.3×)**. *The DPU does the dataplane work, freeing host cores while delivering faster transactions and tighter tail latency.*
+- **Silicon contribution (hw-offload OFF → ON, apples-to-apples — same cluster/CNI/pods, only the offload flag toggled):** multi-stream throughput **15.7 → 39.4 Gbps (+150 %)**, host CPU **−51 %**, p99.9 latency **−41 %**, and **1.7× more bits per DPU-Arm cycle**. *In software the DPU's OVS pipeline caps at ~15.7 Gbps; the eswitch silicon is what uncaps it to line rate.*
 
 ---
 
-## 3. HBN / ECMP: multi-uplink aggregation + resilience (B′)
+## OVN + HBN: multi-uplink aggregation, resilience, and the latency trade-off
 
 - **Bandwidth aggregation:** a single pod pair reaches ~37 Gbps; with multiple concurrent pairs, total throughput scales to **~77 Gbps across the 4 uplinks (≈ 2× a single 40 GbE uplink)**, balanced ~50/50 over both uplinks on both DPUs.
-- **Sub-second failover:** when one uplink's BGP session was dropped mid-test, throughput **held at 36.3 Gbps on the surviving uplink** with no collapse.
-- **Host CPU stays low** (~4–6 %, on par with VPC-OVN accelerated; **no incremental DPU Arm CPU** under load).
-- **Trade-off — latency-sensitive workloads:** HBN's round-trip / connection-rate performance sits at the non-offloaded software level, not the hardware-offloaded level:
+- **Sub-second failover:** dropping one uplink's BGP session mid-test held throughput at **36.3 Gbps on the surviving uplink** — no collapse.
+- **Host CPU stays low** (~6 %; no incremental DPU Arm CPU under load — bulk traffic is hardware-offloaded).
+- **Latency trade-off (important):** HBN's round-trip / connection-rate / tail-latency lands at — or slightly *below* — the **software** (hw-offload-off) level, not the hardware-offloaded level (TCP_RR 13,858 vs hw-on 23,472; p99.9 132.9 µs vs hw-on 63.9 µs). HBN stacks OVN inside a second BGP/ECMP-routed layer whose integration bridge can't be fully hardware-offloaded, so the **small-packet per-packet path falls to the DPU's software datapath**. Bulk throughput and aggregation are unaffected; only latency-sensitive small-packet traffic pays.
 
-  | Metric | VPC-OVN HW | HBN |
-  |---|---:|---:|
-  | TCP_RR | 23,472/s | 13,858/s |
-  | TCP_CRR | 5,370/s | 2,398/s |
-  | sockperf UDP p99.9 | 104 µs | 133 µs |
-
-  (Part of the OVN+HBN per-packet path falls to the software datapath; bulk throughput is unaffected.)
-
-**Choose by workload:** HBN for **throughput / multi-uplink aggregation / path resilience**; VPC-OVN HW for **latency-sensitive RPC / connection-heavy** workloads.
+**Choose by workload:** **OVN hw-on** for latency-sensitive RPC / connection-heavy services; **OVN + HBN** for throughput, multi-uplink bandwidth aggregation, and path resilience.
 
 ---
 
-## Important context for customers
+## Key context & caveats
 
-- **40 GbE is a lab switchport configuration, not a BlueField-3 limit** — BF-3 supports 200 GbE/port; these are line-rate numbers *as configured in this lab*.
-- **Host PCIe is Gen3** (older Supermicro chassis) — not a bottleneck at 40 G, but a Gen5 host would unlock higher ceilings.
-- **UDP send-rate gains are sender-side**; the single-threaded test receiver is the bottleneck in every arm, so effective received rate is lower than the headline send rate.
+- **40 GbE is a lab switchport choice, not a BlueField-3 limit** — BF-3 supports 200 GbE/port. Line-rate figures are *as configured in this lab*.
+- **Host PCIe is Gen3** (older Supermicro chassis) — not a bottleneck at 40 G, but a Gen5 host would raise ceilings.
+- **Tail-latency labels:** values above are the true p99.9 (sockperf `99.900` line); p99.99 is the deeper tail. (An earlier draft cited the p99.99 number as "p99.9" — corrected here.)
+- **Pod placement differs:** Cilium and HBN pods run on the host cluster; the hw-off/hw-on arms run on the DPU tenant cluster. The fair cross-arm dataplane-CPU indicator is `%sys`+`%soft`.
 - **Sample size n=4 per arm** — reported deltas far exceed run-to-run variance.
-- **HBN deployment maturity:** the HBN (B′) configuration required substantial manual effort to stand up against several DPF v25.10.1 issues (on the order of 40–80 engineer-hours) and is **not yet reproducible from a single command**. The VPC-OVN (A/B) path was operationally straightforward. For HBN production adoption, plan for hardening work.
+- **HBN deployment maturity:** standing up the HBN arm required substantial manual effort against several DPF v25.10.1 issues (~40–80 engineer-hours) and is **not yet reproducible from a single command**; the OVN (passthrough / hw-off / hw-on) path was operationally straightforward. Plan hardening work before HBN production adoption.
 
 ---
 
 ## Bottom line
 
-**DPF VPC-OVN acceleration delivers clear, reproducible wins on identical hardware.** Against a host-kernel baseline (comparison #1): host CPU −77 %, transaction/connection rates +175 %/+286 %, tail latency −89 % (9×). Isolating the silicon alone (comparison #2): hardware offload takes OVN-on-DPU from 15.7 → 39.4 Gbps multi-stream, halves host CPU, cuts tail latency 44 %, and is 1.7× more Arm-cycle-efficient. The DPU pays for itself by freeing host cores while improving latency and connection scaling.
+**DPF VPC-OVN acceleration delivers clear, reproducible wins on identical hardware:** vs a host-kernel baseline, host CPU drops ~77 % at line rate, transaction/connection rates rise 2.7–3.9×, and tail latency drops 5.1× at p99.9 (9.3× at p99.99). Isolating the silicon alone, hardware offload takes OVN-on-DPU from 15.7 → 39.4 Gbps multi-stream while halving host CPU and cutting tail latency — at 1.7× better Arm-cycle efficiency. **HBN adds ~77 Gbps multi-uplink aggregation and sub-second failover**, with a latency trade-off on small-packet RPC workloads and added deployment complexity to plan for today.
 
-**HBN/ECMP adds multi-uplink bandwidth aggregation (~77 Gbps over 4 uplinks) and sub-second failover** — with a latency trade-off on small-packet RPC workloads and additional deployment complexity to plan for today.
-
-*Full methodology, raw data, and detailed analysis: `BENCHMARK_REPORT.md`.*
+*Full methodology, raw data, and analysis: `BENCHMARK_REPORT.md`.*

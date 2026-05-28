@@ -30,7 +30,8 @@ The full benchmark matrix from `POD_TO_POD_TEST_PLAN.md` § "Benchmark Matrix" w
 | TCP 8 / 16-stream throughput | 39.4 Gbps (line rate) | 39.4 Gbps (line rate) | — |
 | **TCP request/response rate** | 8 543 round-trips/s | 23 472 round-trips/s | **+175 %** |
 | **TCP connection rate** | 1 392 conn/s | 5 370 conn/s | **+286 %** |
-| **sockperf p99.9 tail latency** | 963 µs | 104 µs | **−89 %** |
+| **sockperf p99.9 tail latency** | 327.7 µs | 63.9 µs | **−80 % (5.1×)** |
+| sockperf p99.99 tail latency | 963 µs | 104 µs | −89 % (9.3×) |
 | Host CPU at line rate (8/16 streams) | 21 % busy | 5 % busy | **−77 %** |
 
 The story isn't that throughput went up — at the per-link fabric ceiling of 40 Gb/s both arms were already saturated. The story is **the DPU does the dataplane work, freeing host cores**, and at the same time delivers **much faster transactions and tighter tail latency** because the per-packet path skips host softirq.
@@ -352,12 +353,15 @@ These are the metrics real workloads care about — RPC services, service meshes
 
 ![Tail latency](results/charts/tail_latency.png)
 
-| | p99.9 round-trip latency |
-|---|---:|
-| Passthrough | 963 µs |
-| VPC-OVN | **104 µs** |
+| sockperf round-trip tail | Passthrough | VPC-OVN | Reduction |
+|---|---:|---:|---:|
+| p99 | 170.9 µs | 43.9 µs | −74 % |
+| **p99.9** | 327.7 µs | **63.9 µs** | **−80 % (5.1×)** |
+| p99.99 | 963 µs | 104 µs | −89 % (9.3×) |
 
-A **9× tail-latency reduction** at p99.9. For latency-sensitive workloads (SLB, low-latency RPC, real-time services) this is the most consequential number in the report. The host CPU's softirq path adds variable delay every time it runs; the DPU's hardware pipeline is deterministic.
+> **Note on percentile labels:** sockperf reports both a `99.900` (p99.9) and a `99.990` (p99.99) line. An earlier revision of this report cited the `99.990` value (963 → 104 µs, 9×) but labeled it "p99.9"; the table above corrects that — the true **p99.9 reduction is 5.1× (327.7 → 63.9 µs)**, and the deeper p99.99 tail is 9.3×. Both are real; they're just different points on the distribution.
+
+A **5.1× p99.9 (9.3× p99.99) tail-latency reduction.** For latency-sensitive workloads (SLB, low-latency RPC, real-time services) this is among the most consequential numbers in the report. The host CPU's softirq path adds variable delay every time it runs; the DPU's hardware pipeline is deterministic — and the gap widens the deeper into the tail you look.
 
 ### 6.3 Per-run distribution (variance check)
 
@@ -474,7 +478,7 @@ HBN's value is **aggregate multi-uplink bandwidth**, demonstrated with **N concu
 | DPU Arm Δ vs idle (sys+soft) | n/a | (see §5.1) | **<1 %** (eswitch offload) |
 | TCP_RR transaction rate | 8 543 | 23 472 | **13 858** ← non-offload level (§ 7.9) |
 | TCP_CRR connection rate | 1 392 | 5 370 | **2 398** ← non-offload level (§ 7.9) |
-| **sockperf UDP p99.9 tail latency** | 963 µs | 104 µs | **132.85 ± 1.97 µs** (n=4) |
+| **sockperf p99.9 tail latency** | 327.7 µs | 63.9 µs | **132.9 ± 2.0 µs** (n=4) |
 
 > **On the single-stream row:** HBN's 36.6 Gbps reads higher than VPC-OVN's 27.1, but that gap is mostly methodological — T2's 27.1 ± **4.0** Gbps is the multi-stream-equivalent single TCP (one VF, one geneve tunnel, host-side window scaling under Cilium) with wide variance, while HBN's 36.6 ± 0.4 is a jumbo single stream with a larger TCP window over the offloaded SF path. Treat the comparison as "HBN is at least as good for one pair" rather than a +35 % silicon claim; the silicon win is already isolated in T2 (§5).
 
@@ -524,23 +528,23 @@ This complements §5.1 (Test Set 2 DPU Arm CPU). In T2 the bench pods *ran on th
 
 ---
 
-### 7.9 Honest caveat — RR/CRR sits at the non-offload level
+### 7.9 Honest caveat — RR / CRR / tail latency at (or slightly below) the software arm
 
-While HBN's bulk-throughput path is hardware-offloaded (37 Gbps single-pair line rate, ~77 Gbps aggregate, no Arm CPU increment), the **round-trip / connection-rate path performs at the VPC-OVN-sw arm's level, not the VPC-OVN-HW arm's:**
+While HBN's bulk-throughput path is hardware-offloaded (37 Gbps single-pair line rate, ~77 Gbps aggregate, no Arm CPU increment), the **round-trip / connection-rate / tail-latency path performs at — and on some metrics slightly *below* — the software (hw-offload-off) arm, well short of the VPC-OVN HW arm:**
 
 | Metric | Cilium (A) | VPC-OVN sw | VPC-OVN HW | **HBN** |
 |---|---:|---:|---:|---:|
-| TCP_RR (trans/s) | 8 543 | ~13 K | **23 472** | **13 858** |
-| TCP_CRR (conn/s) | 1 392 | — | **5 370** | **2 398** |
-| TCP_RR RTT       | 117 µs | ~77 µs | **43 µs** | **72 µs** |
-| **sockperf UDP p99.9** | **963 µs** | — | **104 µs** | **132.85 ± 1.97 µs** (n=4) |
+| TCP_RR (trans/s) | 8 543 | 16 244 | **23 472** | **13 858** |
+| TCP_CRR (conn/s) | 1 392 | 4 500 | **5 370** | **2 398** |
+| TCP_RR mean RTT  | 117 µs | 62 µs | **43 µs** | **72 µs** |
+| **sockperf p99.9** | 327.7 µs | 108.7 µs | **63.9 µs** | **132.9 ± 2.0 µs** (n=4) |
 
-The HBN sockperf p99.9 sits **+29 µs over the VPC-OVN HW arm** — exactly the same gap seen in TCP_RR (43 → 72 µs), confirming a constant per-packet software-path overhead independent of transport (TCP vs UDP). The gap is the cost of OVS-DOCA's two coexisting datapaths visible on the DPU eswitch:
+HBN actually lands a touch **below** the software arm on these metrics (TCP_RR 13 858 vs 16 244; p99.9 132.9 vs 108.7 µs) — it gets **none** of the hardware-offload benefit on the per-packet path *and* adds an extra HBN BGP/ECMP routing layer plus a longer service chain on top. The overhead versus the HW arm is large and shows across the whole distribution: TCP_RR mean **+29 µs**, sockperf **p99.9 +69 µs**. Root cause — OVS-DOCA's two coexisting datapaths on the DPU eswitch:
 
 - **`dp:doca, offloaded:yes`** (hardware eswitch path) — carries the large TCP flows; this is what hits line rate.
 - **`dp:ovs`** (software OVS-DOCA datapath on the Arm PMD cores) — carries the per-packet / control-touched traffic. In the HBN setup, the **br-ovn integration bridge flows** explicitly fall here, with `dp-offload-info: 'match unsupported: br-ovn: unable to get eswitch mgr port id'` reported per flow.
 
-So although bulk packets ride the offload, **enough of the per-packet RR path touches the software datapath** to add the +29 µs RTT. This shows up in RR/CRR (small-packet, latency-dominated) but not in TCP throughput (large-packet, bandwidth-dominated) or in host CPU (the Arm software path is paid for by already-saturated PMD threads, not by host cores).
+So although bulk packets ride the offload, the per-packet RR path traverses the **software datapath plus the HBN routing layer** — which is why RR/CRR/tail-latency land at the software level. This shows up only in small-packet, latency-dominated metrics; TCP throughput (large-packet, bandwidth-dominated), aggregate bandwidth, and host CPU are unaffected.
 
 **Workload guidance:**
 - For **throughput-sensitive / fleet-scale aggregation** workloads, HBN delivers full hardware-paced performance plus multi-uplink ECMP — clear win.
@@ -566,7 +570,7 @@ DPF v25.10.1 VPC-OVN acceleration **delivers measurable, reproducible improvemen
 
 - **Host CPU at line rate falls 76–77 %** — the DPU does the work that the host kernel does in passthrough mode.
 - **Transaction rate (RR) rises ~2.7×, connection rate (CRR) rises ~3.9×** — conntrack and per-flow processing are hardware-offloaded.
-- **Tail latency p99.9 drops 9×** (963 → 104 µs) — predictable hardware path eliminates softirq jitter.
+- **Tail latency p99.9 drops 5.1×** (327.7 → 63.9 µs; the deeper p99.99 tail drops 9.3×, 963 → 104 µs) — predictable hardware path eliminates softirq jitter.
 - **Throughput at the 40 Gb/s fabric line rate is identical** in both arms (39.4 Gbps with 8+ streams) — the wire is the limit; the win shows up in the CPU-busy column.
 - **Single-stream TCP gains 33 %**, **UDP send rate gains 160 %** — TX-side offload is real.
 
