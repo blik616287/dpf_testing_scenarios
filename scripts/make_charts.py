@@ -48,7 +48,7 @@ HBN = {
     # UDP receiver loss %
     "loss-iperf3-udp-max": (41.66, 6.67), "loss-iperf3-udp-64b": (12.43, 2.66),
     "loss-iperf3-udp-1400b": (8.12, 1.65),
-    # sockperf UDP ping-pong p99.9 (us) — added 2026-05-26 (real measurement, n=4 runs 2-5)
+    # sockperf UDP ping-pong TRUE p99.9 (sockperf 99.900 line), n=4 runs 2-5
     "sockperf-p999": (132.85, 1.97),
 }
 def hbn_m(k):  # mean
@@ -78,10 +78,10 @@ def netperf(p):
                 return float(cols[-1])
     except: pass
     return None
-def sockperf_p999(p):
+def sockperf_p999(p):  # TRUE p99.9 (sockperf "percentile 99.900" line)
     try:
         for line in open(p):
-            if "percentile 99.990" in line:
+            if "percentile 99.900" in line:
                 return float(line.split("=")[-1].strip())
     except: pass
     return None
@@ -211,7 +211,7 @@ ax.set_yscale("log")
 ax.set_xticks(xs)
 ax.set_xticklabels(["Cilium\n(host kernel)","VPC-OVN sw\n(hw-offload=false)","VPC-OVN HW\n(hw-offload=true)","DPF + HBN\n(MTU 9000)*"])
 ax.set_ylabel("p99.9 round-trip latency (µs, log scale)")
-ax.set_title("Tail Latency (sockperf UDP ping-pong, p99.9 over 5×60 s, n=4)")
+ax.set_title("Tail Latency (sockperf p99.9 — true 99.900 percentile, n=4)")
 ax.grid(axis="y",linestyle="--",alpha=0.4,which="both")
 for b_,m in zip(bars,means):
     if m is None or m == 0: continue

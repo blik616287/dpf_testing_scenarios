@@ -32,13 +32,14 @@ This is accurate and harmonises with the RR/CRR caveat that follows.
 
 **Original concern:** the three-way table mixed sockperf p99.9 (T1/T2) with netperf p99 (HBN) in the same cell.
 
-**Update:** we re-ran sockperf UDP ping-pong on the HBN cluster matching the T1/T2 methodology exactly (5 × 60 s, n=4 over runs 2-5, ~900K samples per run). The image-pull blocker that drove the original netperf-p99 substitution was solved by side-loading `docker.io/cerotyki/sockperf:latest` with `LD_PRELOAD=""` to disable its broken `libgrwrap.so` preload, and wrapping the server in a respawn loop. Real numbers, apples-to-apples:
+**Update:** we re-ran sockperf UDP ping-pong on the HBN cluster matching the T1/T2 methodology exactly (5 × 60 s, n=4 over runs 2-5, ~900K samples per run), by side-loading `docker.io/cerotyki/sockperf:latest` with `LD_PRELOAD=""` and wrapping the server in a respawn loop. **While doing so we found a percentile-labeling bug:** the report's "p99.9" actually read sockperf's `99.990` line (= p99.99). Corrected, consistent, true p99.9 across all arms:
 
-| sockperf UDP ping-pong p99.9 (n=4) | Passthrough (A) | VPC-OVN HW (B) | **OVN+HBN (B′)** |
+| sockperf tail (n=4) | Cilium (A) | OVN hw-on (B) | **OVN+HBN (B′)** |
 |---|---:|---:|---:|
-| | 963 µs | 104 µs | **132.85 ± 1.97 µs** |
+| **p99.9** (true) | 327.7 µs | **63.9 µs** | **132.9 ± 2.0 µs** |
+| p99.99 | 963 µs | 104 µs | 277.5 µs |
 
-**Suggested fix:** replace the mixed "~97 µs (p99)" cell in the three-way table with **`132.85 ± 1.97 µs (sockperf UDP p99.9, n=4)`**. Now strictly apples-to-apples.
+**Suggested fix:** replace the mixed "~97 µs (p99)" cell with the true **p99.9 = 132.9 ± 2.0 µs** for HBN, and correct the A/B p99.9 cells to **327.7 / 63.9 µs** (they previously showed the p99.99 figures 963 / 104 mislabeled as p99.9). The headline "9× tail-latency reduction" is the p99.99 figure; the true **p99.9 reduction is 5.1×**. Report §1/§6.2/§7 and `tail_latency.png` are already corrected on main.
 
 Raw data is in `results/mtu9000-hbn/sockperf-udp/` (5 run files + SUMMARY.md). HBN sits **+29 µs over the VPC-OVN HW arm** — the same +29 µs gap seen in TCP_RR (43 → 72 µs), confirming a constant per-packet software-path overhead from the OVN+HBN `dp:ovs` fallback (§ 7.9). The chart `results/charts/tail_latency.png` has been regenerated with the HBN 4th bar.
 
