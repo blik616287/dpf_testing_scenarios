@@ -62,27 +62,29 @@ The story isn't that throughput went up — at the per-link fabric ceiling of 40
 | DPU integrated BMC | OpenBMC BF-25.10-15 (build 2025-12-09) at 172.16.30.36 | at 172.16.30.33 |
 | DPU PCIe slot in host | CPU1 SLOT10 | same |
 | PCIe link host ↔ BF3 | x16 @ 8 GT/s (Gen3 — downgraded from BF3-native Gen5; host root complex is Gen3) | same |
-| **DPU `p0` — 40 G fabric port 0** | host-side `enp14s0f0np0`, DPU-side `p0` (DPDK), MAC `c4:70:bd:2b:f6:a2`, MTU 9216, **carries VPC-OVN geneve underlay** in Test Sets 1 & 2 | host-side `enp14s0f0np0`, DPU-side `p0`, MAC `c4:70:bd:f0:65:d6` |
-| **DPU `p1` — 40 G fabric port 1** | host-side `enp14s0f1np1`, DPU-side `p1`, MAC `c4:70:bd:2b:f6:a3`, MTU 9216 — **brought up for HBN underlay testing**, routed `/31` with BGP to leaf | host-side `enp14s0f1np1`, DPU-side `p1`, MAC `c4:70:bd:f0:65:d7` |
+| **DPU `p0` — 40 G fabric port 0** | host-side `enp14s0f0np0`, DPU-side `p0` (DPDK), MAC `c4:70:bd:2b:f6:a2`, MTU 9216 — VPC-OVN geneve underlay (VLAN 497) in T1/T2; **routed `/31` eBGP uplink in HBN (TC3/4)** | host-side `enp14s0f0np0`, DPU-side `p0`, MAC `c4:70:bd:f0:65:d6` |
+| **DPU `p1` — 40 G fabric port 1** | host-side `enp14s0f1np1`, DPU-side `p1`, MAC `c4:70:bd:2b:f6:a3`, MTU 9216 — **routed `/31` eBGP uplink** (both T1/T2 and HBN) | host-side `enp14s0f1np1`, DPU-side `p1`, MAC `c4:70:bd:f0:65:d7` |
 | Mgmt NIC (1 G OOB) | Intel I350 dual-port (`enp129s0f0/f1`), IP 172.16.30.90 on f0 | IP 172.16.30.253 |
 | Secondary mgmt NIC (10 G copper) | Intel X540-AT2 (`ens1f0`), upstream lab connectivity / image pulls — not on bench data path | same |
 | Host BMC IP | (Supermicro IPMI on `enp129s0f0` mgmt LAN) | same |
 | DPU BMC IP | 172.16.30.36 | 172.16.30.33 |
 | DPU OOB IP (post-install, on `oob_net0`) | 172.16.30.29 | 172.16.30.20 |
 | **DPU `ovnvtep` (geneve src in VPC-OVN)** | 172.16.97.98/27 (OVS internal port on `br-ovn-ext`) — VLAN 497 underlay | 172.16.97.102/27 |
-| **DPU `p1` /31 IP (HBN underlay, Test Set 3 prep)** | `172.16.97.249/31` ↔ leaf `172.16.97.248/31` on Eth1/24 | `172.16.97.251/31` ↔ leaf `172.16.97.250/31` on Eth1/26 |
-| **DPU BGP ASN (HBN underlay)** | 65010 (eBGP to leaf AS 65001) | 65020 |
+| **DPU HBN uplink /31s (`p0` + `p1`, all routed L3 eBGP for TC3/4)** | `p0` `172.16.97.241/31`↔leaf `.240` (Eth1/23); `p1` `.249/31`↔leaf `.248` (Eth1/24) | `p0` `172.16.97.245/31`↔leaf `.244` (Eth1/25); `p1` `.251/31`↔leaf `.250` (Eth1/26) |
+| **DPU BGP ASN (HBN underlay, both uplinks)** | 65010 (eBGP to leaf AS 65001) | 65020 |
 
 #### Fabric switch wiring
 
-| Switchport on `custeng.leaf1.1` (Cisco Nexus, NX-OS 9.3(11)) | Connects to | Config | Status |
+The four uplinks (`Eth1/23–26` on `custeng.leaf1.1`, Cisco Nexus NX-OS 9.3(11); all QSFP-H40G-AOC15M 40 Gb/s, MTU 9216) were **reconfigured between Test Set 1/2 and Test Cases 3/4.** For VPC-OVN (T1/T2) the `p0` ports were VLAN 497 access ports carrying the geneve underlay. For **HBN (TC3/4) all four ports — both `p0` and `p1` on both DPUs — are routed `/31` L3 interfaces with eBGP to the leaf** (converted 2026-05-18, LLDP/CDP-verified):
+
+| Switchport | DPU port | Test Set 1/2 config (VPC-OVN) | Test Cases 3/4 config (HBN) |
 |---|---|---|---|
-| **Eth1/23** | gpu1 DPU `p0` | `switchport access vlan 497` (`dpf-dummy-fabric`), MTU 9216 | up, carrying VPC-OVN geneve underlay |
-| **Eth1/24** | gpu1 DPU `p1` | `no switchport`, `ip address 172.16.97.248/31`, MTU 9216; eBGP neighbor `172.16.97.249` remote-as 65010 | up, BGP Established (123 prefixes received from leaf) |
-| **Eth1/25** | gpu2 DPU `p0` | `switchport access vlan 497`, MTU 9216 | up, carrying VPC-OVN geneve underlay |
-| **Eth1/26** | gpu2 DPU `p1` | `no switchport`, `ip address 172.16.97.250/31`, MTU 9216; eBGP neighbor `172.16.97.251` remote-as 65020 | up, BGP Established |
-| Cable type (all four) | QSFP-H40G-AOC15M (40 Gb/s active optical) | — | — |
-| Leaf loopback (advertised via BGP to each DPU) | — | `11.0.0.111/32` | reachable from each DPU at ~0.5 ms RTT |
+| **Eth1/23** | gpu1 `p0` | `switchport access vlan 497` (geneve underlay) | routed `/31`: leaf `172.16.97.240/31` ↔ DPU `.241`, eBGP DPU AS 65010 |
+| **Eth1/24** | gpu1 `p1` | routed `/31`: leaf `172.16.97.248/31` ↔ DPU `.249` (prepped, idle in T1/T2) | routed `/31`, eBGP DPU AS 65010 |
+| **Eth1/25** | gpu2 `p0` | `switchport access vlan 497` (geneve underlay) | routed `/31`: leaf `172.16.97.244/31` ↔ DPU `.245`, eBGP DPU AS 65020 |
+| **Eth1/26** | gpu2 `p1` | routed `/31`: leaf `172.16.97.250/31` ↔ DPU `.251` (prepped, idle in T1/T2) | routed `/31`, eBGP DPU AS 65020 |
+
+Leaf AS 65001, loopback `11.0.0.111/32` (advertised to each DPU, ~0.5 ms RTT). In the HBN config **all four eBGP sessions are Established** — gpu1 (AS 65010) via `p0`+`p1`, gpu2 (AS 65020) via `p0`+`p1`, providing the ECMP underlay in § 7.1. (During Test Sets 1 & 2 only the `p1` /31s existed; the `p0` ports were still VLAN 497, which is the path that bench traffic used — see § 2.4.)
 
 ### 2.2 Software
 
@@ -93,7 +95,7 @@ The story isn't that throughput went up — at the per-link fabric ceiling of 40
 - DPU OS: DOCA Ubuntu 24.04.3 LTS, kernel 6.8.0-1013-bluefield-64k (64 KB pages)
 - DPU OVS-DOCA: 3.2.1005, DB schema 8.5.1
 - DPU DOCA libraries: 3.2.1025-1
-- **FRR 8.4.4 installed on each DPU** for HBN-underlay validation (eBGP on `p1` to leaf — does **not** participate in bench data path; see [§ 2.4](#24-what-was-held-constant-between-arms) "fabric state additions between runs")
+- **FRR / DOCA HBN on each DPU** runs eBGP on **both `p0` and `p1`** to the leaf (AS 65010 / 65020). In Test Sets 1 & 2 this was validation-only and did **not** participate in the bench data path (see [§ 2.4](#24-what-was-held-constant-between-arms)); in Test Cases 3 & 4 it is the **active ECMP underlay** for pod traffic (§ 7).
 - Bench tools: iperf3 3.16, netperf 2.7.1, sockperf 3.10, sysstat (mpstat) 12.6.x — all installed inside the pod via the Ubuntu universe repo
 
 ### 2.3 Topology
@@ -203,6 +205,8 @@ These switch ports and DPU interfaces were configured **between** Test Set 1 and
 | Hugepages `vm.nr_hugepages=4` (4 × 512 MB = 2 GB) on each DPU | DPU OS | Required for OVS-DOCA / DPDK to start | Yes — applied at setup, identical in both Test Set 2 arms |
 
 **Net effect on the benchmark:** the bench data path is `pod → SF → br-int → br-ovn-ext (ovnvtep .98/.102) → geneve → br-sfc → p0 → Eth1/23 ↔ Eth1/25 → mirror on the other side`. None of the new `p1` / `/31` / BGP state participates in that path. The DPU still has its full attention on the VPC-OVN dataplane during the run; FRR is a small userspace process with negligible CPU.
+
+> This table reflects the **Test Set 1/2** fabric state, in which only the `p1` ports were routed `/31` (and idle). **For Test Cases 3 & 4 the `p0` ports (`Eth1/23`, `Eth1/25`) were also converted from VLAN 497 access to routed `/31` eBGP** (2026-05-18), so under HBN **all four uplinks are L3 routed /31 with eBGP** — see the § 2.1 fabric-wiring table and § 7.1.
 
 ---
 
