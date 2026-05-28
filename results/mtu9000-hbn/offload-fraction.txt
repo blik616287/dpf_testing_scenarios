@@ -1,0 +1,32 @@
+=== HBN offload fraction during a sustained large flow (DPU gpu1 eswitch) ===
+Captured via `ovs-appctl dpctl/dump-flows -m` on the DPU mid-flow during an
+8-stream iperf3 (36.4 Gbits/sec receiver).
+
+Aggregate bytes by datapath:
+  hardware (dp:doca / offloaded:yes):  ~100.0 %   (bench data flow: 4,317,641 pkts / 38.0 GB, offloaded:yes, dp:doca)
+  software (dp:ovs):                      0.0 %   (~40 MB total)
+
+What's on the software path: ONLY connection-setup packets, e.g.
+  flags:S ... ct(commit,zone=5,mark=0/0x1,nat(src)) ...
+  dp-offload-info: 'match unsupported: unmatched fields are ct_state=+new-est-rel-rpl-inv+trk'
+i.e. the SYN / first-packet (ct_state=+new) of each connection. Once a
+connection is established, its data packets ride the hardware eswitch.
+
+Implication:
+  - Large / long-lived flows  -> ~100% hardware-offloaded -> line rate (offload-true).
+  - TCP_CRR (new connection every transaction) pays the per-connection software
+    setup cost every op -> biggest latency/rate penalty (2,398 vs HW 5,370 conn/s).
+  - TCP_RR / sockperf on a persistent connection: data offloaded, but the
+    OVN+HBN offloaded pipeline has more recirculation stages (geneve + HBN
+    ECMP route + ct/recirc) than plain VPC-OVN -> modest per-op latency penalty
+    (p99.9 132.9 vs HW 63.9 us).
+
+Corroborating: DPU Arm busy% is flat (idle == under-load, sec 7.8) during the
+bulk flow -> the Arm isn't moving the bytes, the eswitch silicon is.
+
+Supporting metric (TCP_RR request-size sweep, HBN, fixed per-op overhead amortizes):
+  req=1B     mean=74.1us  p99=107us  rate=13460/s  eff_bw=0.00 Gbps
+  req=256B   mean=72.4us  p99=94us   rate=13784/s  eff_bw=0.06 Gbps
+  req=1024B  mean=78.9us  p99=104us  rate=12642/s  eff_bw=0.21 Gbps
+  req=8192B  mean=102.4us p99=130us  rate=9744/s   eff_bw=1.28 Gbps
+  req=65536B mean=209.6us p99=309us  rate=4760/s   eff_bw=4.99 Gbps

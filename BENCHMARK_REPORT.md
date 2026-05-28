@@ -539,12 +539,14 @@ While HBN's bulk-throughput path is hardware-offloaded (37 Gbps single-pair line
 | TCP_RR mean RTT  | 117 µs | 62 µs | **43 µs** | **72 µs** |
 | **sockperf p99.9** | 327.7 µs | 108.7 µs | **63.9 µs** | **132.9 ± 2.0 µs** (n=4) |
 
-HBN actually lands a touch **below** the software arm on these metrics (TCP_RR 13 858 vs 16 244; p99.9 132.9 vs 108.7 µs) — it gets **none** of the hardware-offload benefit on the per-packet path *and* adds an extra HBN BGP/ECMP routing layer plus a longer service chain on top. The overhead versus the HW arm is large and shows across the whole distribution: TCP_RR mean **+29 µs**, sockperf **p99.9 +69 µs**. Root cause — OVS-DOCA's two coexisting datapaths on the DPU eswitch:
+HBN lands a touch **below** the software arm on these metrics (TCP_RR 13 858 vs 16 244; p99.9 132.9 vs 108.7 µs), well short of the HW arm (TCP_RR mean **+29 µs**, sockperf **p99.9 +69 µs** vs HW).
 
-- **`dp:doca, offloaded:yes`** (hardware eswitch path) — carries the large TCP flows; this is what hits line rate.
-- **`dp:ovs`** (software OVS-DOCA datapath on the Arm PMD cores) — carries the per-packet / control-touched traffic. In the HBN setup, the **br-ovn integration bridge flows** explicitly fall here, with `dp-offload-info: 'match unsupported: br-ovn: unable to get eswitch mgr port id'` reported per flow.
+**But this is *not* a wholesale software fallback — measured directly (`offload-fraction.txt`).** During a sustained 36.4 Gbps flow, the DPU eswitch shows the bench **data flow ~100 % hardware-offloaded** (`offloaded:yes, dp:doca`, 38 GB); the only traffic on the software datapath (`dp:ovs`, ~40 MB, 0.0 %) is **connection-setup packets** — `ct(commit,…nat) … 'match unsupported: ct_state=+new'`, i.e. the SYN / first packet of each connection. Established-connection data rides the hardware eswitch. So the latency penalty comes from two narrow sources, not from bulk traffic being in software:
 
-So although bulk packets ride the offload, the per-packet RR path traverses the **software datapath plus the HBN routing layer** — which is why RR/CRR/tail-latency land at the software level. This shows up only in small-packet, latency-dominated metrics; TCP throughput (large-packet, bandwidth-dominated), aggregate bandwidth, and host CPU are unaffected.
+- **Per-connection setup is software** → every TCP_CRR transaction opens a new connection and pays it → CRR takes the biggest hit (2 398 vs 5 370 conn/s).
+- **The HBN offloaded pipeline is *deeper* than plain VPC-OVN** (geneve encap + HBN ECMP route + extra `ct`/`recirc` stages), adding per-operation latency even though the packets are hardware-offloaded → the moderate TCP_RR / sockperf-p99.9 gap.
+
+**Consequence — large flows reach offload-true performance:** because established-connection data is ~100 % offloaded, throughput, multi-uplink aggregation, and DPU-Arm CPU are unaffected (§7.2/7.4/7.8). The penalty is confined to **connection-churn (CRR)** and **small-packet RR** workloads. A supporting TCP_RR request-size sweep confirms the fixed per-op overhead amortizes — effective bandwidth climbs 0.06 → 5.0 Gbps as the transaction grows 256 B → 64 KB (`offload-fraction.txt`).
 
 **Workload guidance:**
 - For **throughput-sensitive / fleet-scale aggregation** workloads, HBN delivers full hardware-paced performance plus multi-uplink ECMP — clear win.
