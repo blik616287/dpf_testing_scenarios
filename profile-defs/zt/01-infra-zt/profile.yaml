@@ -1,0 +1,96 @@
+name: dpf-ovnk-hbn-infra-zt
+description: |
+  Cluster-type infra profile: edge-native OS + edge-k8s 1.33.6 (no CNI,
+  no kube-proxy) + cni-ovn-kubernetes + csi-longhorn + DPF prereqs +
+  DPF operator (Zero Trust mode) + nvidia network-operator + the
+  dpf-zt-cluster inline manifest pack with the 8 NetOp-v2 carry-overs
+  plus the W3/W5 CronJobs from profile-addons-accelerated/.
+
+  Forks 69f25bfa957ca8a8c6eeb06a (DPF ZT CP-Agent NetOp v2). The single
+  divergence vs the §7 reference at the infra layer is the CNI swap:
+  Cilium → OVN-Kubernetes (per constraint 2). edge-k8s 1.33.6 is preserved
+  to match the §7-measured stack; the kubeproxy disable + cni:none is
+  delivered via kubeadm skipPhases in the values overlay (D1.5.1.a).
+
+  Implements HBN_PROFILE_PLAN_V2.md § D1.5.1.
+
+  STATUS: SKELETON.
+  Pack list and UIDs are wired. Each values/<pack>.yaml file is currently a
+  pointer to its /tmp/palette-pack-values/ snapshot; build_palette_profile.py
+  will fail until the values files are populated. See per-file TODOs.
+
+type: cluster
+cloudType: edge-native
+version: "1.0.0"
+labels:
+  tier: infra
+  dpf-version: "25.10.1"
+  dpf-mode: zero-trust
+  cni: ovn-kubernetes
+  k8s: edge-k8s-1.33.6
+
+packs:
+  - name: edge-native-byoi
+    type: oci
+    layer: os
+    registryUid: "64eaff453040297344bcad5d"
+    packUid:     "675f1171e0153f3d34d22d13"
+    tag:         "2.1.0"
+    valuesFile:  edge-native-byoi.yaml
+
+  - name: edge-k8s
+    type: oci
+    layer: k8s
+    registryUid: "64eaff453040297344bcad5d"
+    packUid:     "696d0ee4ef11f75302dbdaff"
+    tag:         "1.33.6"
+    valuesFile:  edge-k8s.yaml
+
+  - name: cni-ovn-kubernetes
+    type: oci
+    layer: cni
+    registryUid: "64cbb11ccd8804c7daa9543b"
+    packUid:     "67fe80de85df4bd9d894c1cc"
+    valuesFile:  cni-ovn-kubernetes.yaml
+
+  - name: csi-longhorn
+    type: oci
+    layer: csi
+    registryUid: "64eaff453040297344bcad5d"
+    packUid:     "690e16355571ad04766ba35b"
+    tag:         "1.10.0"
+    valuesFile:  csi-longhorn.yaml
+
+  - name: nvidia-dpf-prereqs
+    type: oci
+    layer: addon
+    registryUid: "671a7057c9a67791a2add6c0"
+    packUid:     "6981cbbae0eb268cb6bf71e9"
+    tag:         "25.10.1"
+    valuesFile:  nvidia-dpf-prereqs.yaml
+
+  - name: nvidia-dpf-operator
+    type: oci
+    layer: addon
+    registryUid: "671a7057c9a67791a2add6c0"
+    packUid:     "69808f9d35d497da0b235119"
+    tag:         "25.10.1"
+    valuesFile:  nvidia-dpf-operator.yaml
+
+  - name: network-operator
+    type: oci
+    layer: addon
+    registryUid: "671a7057c9a67791a2add6c0"
+    packUid:     "6951d8be0689c1e30fa160f2"
+    tag:         "25.10.0"
+    valuesFile:  network-operator.yaml
+
+  - name: dpf-zt-cluster
+    type: manifest
+    layer: addon
+    values: |
+      pack:
+        spectrocloud.com/install-priority: "20"
+    # The 8 carry-overs from NetOp v2 + 2 new ZT CronJobs.
+    # Build script picks them up in lex order from manifests/.
+    manifestsGlob: manifests/*.yaml

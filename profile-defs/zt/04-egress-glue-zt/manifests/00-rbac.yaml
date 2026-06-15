@@ -1,0 +1,28 @@
+# RBAC for the egress-glue DaemonSet — needs hostPath + privileged + nsenter.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpf-egress-glue
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpf-egress-glue
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpf-egress-glue
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpf-egress-glue
+subjects:
+  - kind: ServiceAccount
+    name: dpf-egress-glue
+    namespace: dpf-operator-system

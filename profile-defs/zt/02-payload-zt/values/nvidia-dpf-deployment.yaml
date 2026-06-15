@@ -1,0 +1,62 @@
+# nvidia-dpf-deployment 25.10.1 values for the ZT HBN payload.
+#
+# STATUS: TODO — skeleton only. Author the full values block from
+# /tmp/palette-pack-values/ht2-nvidia-dpf-deployment.yaml as the structural
+# reference, with these required overrides per HBN_PROFILE_PLAN_V2.md § D1.5.2:
+#
+# 1. charts.dpf-deployment.dpuFlavors[0].dpuMode: zero-trust
+#    (NOT host-trusted as in the AICP reference)
+# 2. charts.dpf-deployment.dpuFlavors[0].grub.kernelParameters: include
+#    hugepages=3072 (B.2 W16)
+# 3. charts.dpf-deployment.dpuFlavors[0].nvconfig: include
+#    ENABLE_ESWITCH_MULTIPORT=yes + LAG_RESOURCE_ALLOCATION=1
+# 4. charts.dpf-deployment.dpuFlavors[0].configFiles include mlnx-bf.conf and
+#    mlnx-ovs.conf with OVS_DOCA=yes, CREATE_OVS_BRIDGES=no
+# 5. charts.dpf-deployment.dpuFlavors[0].ovs.rawConfigScript: br-sfc + br-hbn
+#    + br-dpu + br-ovn topology, hw-offload=true, doca-init=true,
+#    br-dpu external-ids:bridge-uplink=p0 (B.2 W6)
+# 6. dpuServiceTemplates[doca-hbn]: helm ref to HBN_HELM_REPO v1.0.5
+# 7. dpuServiceTemplates[ovn]: helm ref to OVNK_HELM_REPO at OVNK_CHART_TAG
+#    with gatewayOpts: --gateway-interface=br-dpu, v4TransitSwitchSubnet 10.0.120.0/22
+# 8. dpuServiceConfigurations[doca-hbn].serviceDaemonSet.annotations.networks:
+#    5-entry fully-namespaced (encodes B.2 W14):
+#      - iprequest ip_lo (loopback pool)
+#      - iprequest ip_pf2dpu2 (pool1 + default gateway)
+#      - mybrhbn p0_if (mtu 9216)
+#      - mybrhbn p1_if (mtu 9216)
+#      - mybrhbn pf2dpu2_if (mtu 9216)
+# 9. dpuServiceConfigurations[doca-hbn].helmChart.values.configuration:
+#    perDPUValuesYAML keyed by DPU1_HOSTNAME_PATTERN / DPU2_HOSTNAME_PATTERN
+#    with per-DPU bgp_autonomous_system + p0/p1 peer/local IPs as
+#    spectro vars (DPU1_*, DPU2_*).
+# 10. startupYAMLJ2: numbered eBGP, both p0_if and p1_if neighbors,
+#     multipaths.ebgp=16, redistribute connected, path-selection multipath
+#     aspath-ignore on. Per § 7.1.
+# 11. dpuDeployments[ovn-hbn]: services {doca-hbn, ovn}, serviceChains
+#     switches: uplink p0 -> doca-hbn p0_if, uplink p1 -> doca-hbn p1_if,
+#     ovn -> doca-hbn pf2dpu2_if.
+# 12. dpuServiceInterfaces: physical p0 (label uplink=p0), physical p1 (uplink=p1).
+# 13. dpuServiceIPAMs: pool1 (HbnPool1CIDR /24, gatewayIndex 2, /29 per DPU
+#     with per-DPU allocations), loopback (HbnLoopbackCIDR /24, /32).
+# 14. dpuServiceCredentialRequests[ovn-dpu]: serviceAccount ovn-dpu in
+#     dpf-operator-system, duration 2160h, type tokenFile,
+#     targetNamespace ovn-kubernetes (B.2 W4 SA-token chain).
+#
+# Spectro vars consumed (see PROFILE_VARS in scripts/dpf_deploy.py):
+#   BFB_URL, DPUNumVFs, FabricMTU, HbnSwpMTU, PodMTU,
+#   HbnPool1CIDR, HbnLoopbackCIDR,
+#   HBN_HELM_REPO, OVNK_HELM_REPO, OVNK_CHART_TAG,
+#   DPU1_HOSTNAME_PATTERN, DPU1_HOSTNAME, DPU1_BGP_ASN,
+#   DPU1_P0_PEER_IP, DPU1_P0_LOCAL_IP, DPU1_P1_PEER_IP, DPU1_P1_LOCAL_IP,
+#   DPU1_POOL1_CIDR,
+#   DPU2_HOSTNAME_PATTERN, DPU2_HOSTNAME, DPU2_BGP_ASN,
+#   DPU2_P0_PEER_IP, DPU2_P0_LOCAL_IP, DPU2_P1_PEER_IP, DPU2_P1_LOCAL_IP,
+#   DPU2_POOL1_CIDR.
+
+pack:
+  namespace: dpf-operator-system
+  spectrocloud.com/install-priority: "30"
+
+# TODO: full values block — author from ht2-nvidia-dpf-deployment.yaml minus AICP,
+# flip dpuMode to zero-trust, configure numbered /31 BGP per § 7.1.
+# See HBN_PROFILE_PLAN_V2.md § D1.5.2 for the load-bearing diffs.

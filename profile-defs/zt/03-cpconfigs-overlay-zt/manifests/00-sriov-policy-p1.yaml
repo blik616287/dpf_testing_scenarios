@@ -1,0 +1,22 @@
+# SriovNetworkNodePolicy for the BF3 PF1 (bf3-p1-vfs).
+# The base Spectro-DPU-DPF-CP-Configs ships only bf3-p0-vfs; HBN ECMP needs VFs
+# on both PFs so this overlay uncomments PF1 with a separate resourceName.
+# Encodes B.2 W12 partially (the VF rename DS in egress-glue completes it).
+
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetworkNodePolicy
+metadata:
+  name: bf3-p1-vfs
+  namespace: nvidia-network-operator
+spec:
+  resourceName: bf3-vfs-p1
+  nodeSelector:
+    feature.node.kubernetes.io/dpu-enabled: "true"
+  priority: 99
+  numVfs: 0   # externallyManaged — VFs are created by bootstrap-dpf; we just advertise them
+  externallyManaged: true
+  deviceType: netdevice
+  nicSelector:
+    pfNames:
+      - "{{ .spectro.var.DPU }}f1np1#2-45"
+  isRdma: false

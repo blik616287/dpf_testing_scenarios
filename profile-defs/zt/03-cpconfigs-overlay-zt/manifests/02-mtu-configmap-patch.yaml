@@ -1,0 +1,93 @@
+# MTU configmap-patch Job — encodes B.2 W13.
+#
+# Pod MTU is taken from the host-cluster `ovn-kubernetes-config` ConfigMap key
+# `mtu`. The base OVN-K pack values set the chart's own MTU but the
+# cluster-manager + node-dpu-host pods read the *ConfigMap*. This Job:
+#   1) waits until the ConfigMap exists
+#   2) patches mtu=<PodMTU>
+#   3) restarts cluster-manager and node-dpu-host so the new MTU takes effect
+#
+# Idempotent: re-applying the profile re-runs the Job which is a no-op if the
+# ConfigMap already has the desired MTU.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpf-mtu-patcher
+  namespace: ovn-kubernetes
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpf-mtu-patcher
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["ovn-kubernetes-config"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    resourceNames: ["ovnkube-cluster-manager", "ovnkube-node-dpu-host"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]   # for the wait-loop
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpf-mtu-patcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpf-mtu-patcher
+subjects:
+  - kind: ServiceAccount
+    name: dpf-mtu-patcher
+    namespace: ovn-kubernetes
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dpf-mtu-configmap-patch
+  namespace: ovn-kubernetes
+  annotations:
+    # Re-run on every helm/profile apply.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      serviceAccountName: dpf-mtu-patcher
+      restartPolicy: OnFailure
+      containers:
+        - name: patch
+          image: bitnami/kubectl:1.33
+          env:
+            - name: TARGET_MTU
+              value: "{{ .spectro.var.PodMTU }}"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -eu
+              echo "waiting for ovn-kubernetes-config ConfigMap…"
+              for i in $(seq 1 60); do
+                if kubectl -n ovn-kubernetes get cm ovn-kubernetes-config >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 5
+              done
+              kubectl -n ovn-kubernetes get cm ovn-kubernetes-config >/dev/null \
+                || { echo "ovn-kubernetes-config never appeared; aborting"; exit 1; }
+              current=$(kubectl -n ovn-kubernetes get cm ovn-kubernetes-config -o jsonpath='{.data.mtu}' 2>/dev/null || echo "")
+              echo "current mtu=${current:-<unset>}, target=${TARGET_MTU}"
+              if [ "${current}" = "${TARGET_MTU}" ]; then
+                echo "no change needed"; exit 0
+              fi
+              kubectl -n ovn-kubernetes patch cm ovn-kubernetes-config --type=merge -p "{\"data\":{\"mtu\":\"${TARGET_MTU}\"}}"
+              kubectl -n ovn-kubernetes rollout restart deploy/ovnkube-cluster-manager 2>/dev/null || true
+              kubectl -n ovn-kubernetes rollout restart ds/ovnkube-node-dpu-host 2>/dev/null || true
+              echo "mtu patched to ${TARGET_MTU} and ovnk components restarted"
