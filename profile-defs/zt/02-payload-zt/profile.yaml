@@ -1,0 +1,35 @@
+name: dpf-ovnk-hbn-payload-zt
+description: |
+  HBN payload addon — single pack `nvidia-dpf-deployment 25.10.1` with
+  values authored FROM SCRATCH (do NOT reuse the broken 698dd2dd values).
+
+  Carries the DPUFlavor `hbn-ovnk` (dpuMode: zero-trust), DPUServiceTemplate
+  `doca-hbn` (numbered /31 eBGP, ECMP across both p0 and p1 per § 7.1),
+  DPUServiceTemplate `ovn` (DPU-side OVN-K node), DPUDeployment `ovn-hbn`
+  with the 3-switch SFC chain (p0 + p1 uplinks + ovn↔pf2dpu2), DPUServiceIPAMs
+  (pool1 + loopback), DPUServiceCredentialRequest (`ovn-dpu`, 2160h).
+
+  Implements HBN_PROFILE_PLAN_V2.md § D1.5.2.
+
+  STATUS: SKELETON.
+  Pack reference is wired; the values block under values/nvidia-dpf-deployment.yaml
+  is a TODO — author from the structural reference at
+  /tmp/palette-pack-values/ht2-nvidia-dpf-deployment.yaml (strip AICP, set
+  numbered BGP, dpuMode: zero-trust). DO NOT copy from _broken-hbn-values.yaml.
+
+type: add-on
+cloudType: edge-native
+version: "1.0.0"
+labels:
+  tier: addon
+  dpf-mode: zero-trust
+  feature: hbn-payload
+
+packs:
+  - name: nvidia-dpf-deployment
+    type: oci
+    layer: addon
+    registryUid: "671a7057c9a67791a2add6c0"
+    packUid:     "69808f9d35d497da06f2e564"
+    tag:         "25.10.1"
+    valuesFile:  nvidia-dpf-deployment.yaml

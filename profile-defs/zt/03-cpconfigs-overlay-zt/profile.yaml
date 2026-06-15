@@ -1,0 +1,40 @@
+name: dpf-ovnk-hbn-cpconfigs-overlay-zt
+description: |
+  Values overlay layered *alongside* the existing Spectro-DPU-DPF-CP-Configs
+  addon (69b7039ae8451ebc583d6a13). The base CP-Configs already ships
+  DPUCluster + nic-cluster-policy + sriov-policy (bf3-p0-vfs only); this
+  overlay adds:
+    - sriov-policy-p1               bf3-p1-vfs (was commented out in base)
+    - ovnk-resource-injector        HelmChart CR (no Palette pack for it)
+    - mtu-configmap-patch           Job that patches ovn-kubernetes-config.mtu
+                                    in the host-cluster ConfigMap (W13)
+    - ovn-zone-label-controller     long-running Deployment that re-applies
+                                    k8s.ovn.org/zone-name labels to ghost
+                                    Node objects (W10)
+
+  Install-priority "1" so the overlay sequences after base CP-Configs (0)
+  but before the HBN payload (30).
+
+  Implements HBN_PROFILE_PLAN_V2.md § D1.5.3.
+type: add-on
+cloudType: edge-native
+version: "1.0.0"
+labels:
+  tier: addon
+  dpf-mode: zero-trust
+  feature: cpconfigs-overlay
+
+packs:
+  - name: dpf-cpconfigs-overlay
+    type: manifest
+    layer: addon
+    values: |
+      pack:
+        namespace: dpf-operator-system
+        spectrocloud.com/install-priority: "1"
+        DPU:              "{{ .spectro.var.DPU }}"
+        DPUNumVFs:        "{{ .spectro.var.DPUNumVFs }}"
+        PodMTU:           "{{ .spectro.var.PodMTU }}"
+        OVNK_HELM_REPO:   "{{ .spectro.var.OVNK_HELM_REPO }}"
+        OVNK_CHART_TAG:   "{{ .spectro.var.OVNK_CHART_TAG }}"
+    manifestsGlob: manifests/*.yaml

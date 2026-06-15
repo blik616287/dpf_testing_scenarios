@@ -1,0 +1,26 @@
+# OVN-Kubernetes resource-injector webhook.
+# There is no Palette pack for it (the cni-ovn-kubernetes pack is upstream OSS
+# without the Mellanox resource-injector subchart). We deliver it as a
+# helm-controller HelmChart CR.
+#
+# The injector watches Pod admission and adds the SR-IOV VF resource request
+# `nvidia.com/bf3-p0-vfs: 1` to pods carrying the DPU-offload network annotation,
+# so the user doesn't have to template it into every pod spec.
+
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: ovn-kubernetes-resource-injector
+  namespace: ovn-kubernetes
+spec:
+  chart: ovn-kubernetes-resource-injector
+  repo: "{{ .spectro.var.OVNK_HELM_REPO }}"
+  version: "{{ .spectro.var.OVNK_CHART_TAG }}"
+  targetNamespace: ovn-kubernetes
+  valuesContent: |
+    resourceInjector:
+      enabled: true
+      resourceName: nvidia.com/bf3-p0-vfs
+      # Match pods on the dpf-ovn-kubernetes NAD (the DPU-offloaded default network).
+      namespaceSelectorLabelKey: dpf.spectrocloud.com/offload-eligible
+      namespaceSelectorLabelValue: "true"
