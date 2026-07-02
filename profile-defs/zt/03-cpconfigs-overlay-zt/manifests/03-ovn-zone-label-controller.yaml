@@ -1,0 +1,106 @@
+# OVN zone-label controller — encodes B.2 W10.
+#
+# OVN-K's get_node_zone reads the k8s.ovn.org/zone-name label from the
+# *host-cluster* Node object for the DPU node name. Under Zero Trust, the DPU
+# nodes live in the kamaji-managed tenant cluster; their representations in
+# the host cluster are "ghost" Node objects created by the dpf-operator. When
+# the operator is scaled down (or recreated), the ghost Nodes lose their zone
+# labels and ovn-controller refuses to bind ports ("configured zone global ≠ NBDB").
+#
+# This Deployment runs a long-lived reconcile loop that:
+#   - watches DPU CRs in dpf-operator-system
+#   - for each one with a node-name annotation, ensures the host-cluster
+#     Node object exists with k8s.ovn.org/zone-name=<node> + k8s.ovn.org/dpu-host=""
+#   - re-creates the Node object if it was deleted
+#
+# Uses kubectl in a sidecar for simplicity; production version should be a real
+# controller-runtime binary, but for the bench profile we keep deps minimal.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpf-zone-labeler
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpf-zone-labeler
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpus", "dpunodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpf-zone-labeler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpf-zone-labeler
+subjects:
+  - kind: ServiceAccount
+    name: dpf-zone-labeler
+    namespace: dpf-operator-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dpf-zone-label-controller
+  namespace: dpf-operator-system
+  labels:
+    app.kubernetes.io/name: dpf-zone-label-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dpf-zone-label-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dpf-zone-label-controller
+    spec:
+      serviceAccountName: dpf-zone-labeler
+      containers:
+        - name: reconciler
+          image: bitnami/kubectl:1.33
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -u
+              while true; do
+                # For each DPUNode in dpf-operator-system, ensure a host-cluster
+                # Node object exists with the right labels.
+                for dpu in $(kubectl -n dpf-operator-system get dpunodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+                  if ! kubectl get node "$dpu" >/dev/null 2>&1; then
+                    cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || true
+              apiVersion: v1
+              kind: Node
+              metadata:
+                name: ${dpu}
+                labels:
+                  feature.node.kubernetes.io/dpu-enabled: "true"
+                  k8s.ovn.org/dpu-host: ""
+                  k8s.ovn.org/zone-name: ${dpu}
+                annotations:
+                  k8s.ovn.org/remote-zone-migrated: ${dpu}
+              EOF
+                  else
+                    kubectl label  node "$dpu" "k8s.ovn.org/zone-name=${dpu}" --overwrite >/dev/null 2>&1 || true
+                    kubectl label  node "$dpu" "k8s.ovn.org/dpu-host=" --overwrite >/dev/null 2>&1 || true
+                    kubectl annotate node "$dpu" "k8s.ovn.org/remote-zone-migrated=${dpu}" --overwrite >/dev/null 2>&1 || true
+                  fi
+                done
+                sleep 30
+              done
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"

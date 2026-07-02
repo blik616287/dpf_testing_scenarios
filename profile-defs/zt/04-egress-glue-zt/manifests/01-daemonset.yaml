@@ -1,0 +1,211 @@
+# DPF egress-glue DaemonSet — drops 4–7 systemd units onto /host/etc/systemd/system
+# and enables them via nsenter -t 1. Encodes the load-bearing § B.2 workarounds:
+#   W6/W9  dpf-brdpu-shim.service           br-comm-ch metric fix + dedup .90/24 on br-dpu
+#   W8     vip240-arp.service + proxy       .240 tenant-API VIP plumbing (CP node only)
+#   W12    dpf-vf-rename.service            VF1 -> enp14s0f0np0v1; dhcpcd PF0
+#   W15    dpf-dpu-clock.service + timer    push host epoch to DPU console every 30 min
+#   W16    dpf-runtime-fixup.service        hugepages + oob_net0 link-up at sysinit
+#   opt    tinyproxy.service                gated by enableTinyproxy=true
+#
+# DS body sketch — mirrors infra-zt-dpf-zt-cluster--host-prep.yaml (the nsenter -t 1 -m
+# pattern). One pod per node; idempotent loop emits each unit if drift detected and
+# `systemctl daemon-reload && systemctl enable --now <unit>`s.
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dpf-egress-glue
+  namespace: dpf-operator-system
+  labels:
+    app.kubernetes.io/name: dpf-egress-glue
+    app.kubernetes.io/component: egress-glue
+  annotations:
+    # If enableEgressGlue=false this DS is created but the pod-init script no-ops.
+    # We don't conditionally create the DS so the customer can flip the toggle later
+    # without re-applying the profile.
+    dpf.spectrocloud.com/gated-by: enableEgressGlue
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dpf-egress-glue
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dpf-egress-glue
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      serviceAccountName: dpf-egress-glue
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: glue
+          image: ubuntu:24.04
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: ENABLE_EGRESS_GLUE
+              value: "{{ .spectro.var.enableEgressGlue }}"
+            - name: ENABLE_TINYPROXY
+              value: "{{ .spectro.var.enableTinyproxy }}"
+            - name: TENANT_API_VIP
+              value: "{{ .spectro.var.tenantApiVIP }}"
+            - name: KAMAJI_BACKEND_IP
+              value: "{{ .spectro.var.kamajiBackendIP }}"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_ROLE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['node-role.kubernetes.io/control-plane']
+          volumeMounts:
+            - name: host
+              mountPath: /host
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -u
+              echo "dpf-egress-glue v1: enable=${ENABLE_EGRESS_GLUE} node=${NODE_NAME}"
+              if [[ "${ENABLE_EGRESS_GLUE,,}" != "true" ]]; then
+                echo "enableEgressGlue=false — sleeping (no-op)"
+                exec sleep infinity
+              fi
+              apt-get -qq update && apt-get -qq install -y util-linux iproute2 >/dev/null 2>&1 || true
+
+              SYSD=/host/etc/systemd/system
+              install -d -m 0755 "$SYSD" /host/usr/local/sbin
+
+              # ------- dpf-runtime-fixup.service (W16) -----------------------
+              cat >"$SYSD/dpf-runtime-fixup.service" <<'EOF'
+              [Unit]
+              Description=DPF runtime fixup: hugepages + oob_net0 link-up
+              DefaultDependencies=no
+              Before=network-pre.target ovs-vswitchd.service
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/bin/sh -c 'echo 3072 > /proc/sys/vm/nr_hugepages'
+              ExecStart=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do ip link set oob_net0 up 2>/dev/null && break; sleep 6; done; exit 0'
+              [Install]
+              WantedBy=sysinit.target
+              EOF
+
+              # ------- dpf-brdpu-shim.service (W6, W9) — CP-only -------------
+              if [[ "${NODE_ROLE:-}" == "" || "${NODE_ROLE:-}" == "true" ]]; then
+                cat >"$SYSD/dpf-brdpu-shim.service" <<'EOF'
+              [Unit]
+              Description=DPF br-comm-ch metric fix + dedup .90/24 on br-dpu
+              After=network-online.target
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/bin/sh -c 'ip route flush dev br-comm-ch 2>/dev/null; ip route add 172.16.30.0/24 dev br-comm-ch metric 600 2>/dev/null || true'
+              ExecStart=/bin/sh -c 'ip addr show dev br-dpu 2>/dev/null | awk "/inet 172.16.30.90\/24/ {print \$2}" | xargs -r -I{} ip addr del {} dev br-dpu'
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+              fi
+
+              # ------- vip240-* (W8) — CP-only -------------------------------
+              if [[ "${NODE_ROLE:-}" == "" || "${NODE_ROLE:-}" == "true" ]]; then
+                cat >/host/usr/local/sbin/vip240-arp.sh <<EOF
+              #!/bin/bash
+              # OpenFlow ARP-responder for tenant API VIP on brbr-dpu.
+              # .240 is deliberately NOT a kernel IP — kernel-local would skip nat.
+              VIP="${TENANT_API_VIP}"
+              ovs-vsctl set bridge brbr-dpu fail_mode=secure 2>/dev/null || true
+              ovs-ofctl add-flow brbr-dpu "priority=1100,arp,arp_tpa=\$VIP,actions=move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],mod_dl_src:c4:70:bd:00:02:40,load:0x2->NXM_OF_ARP_OP[],move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],load:0xc470bd000240->NXM_NX_ARP_SHA[],load:\$(printf '0x%08x' \$(IFS=. read a b c d <<<\"\$VIP\"; echo \$((a*16777216+b*65536+c*256+d))))->NXM_OF_ARP_SPA[],in_port"
+              ovs-ofctl add-flow brbr-dpu "priority=1100,tcp,nw_dst=\$VIP,tp_dst=30929,actions=LOCAL"
+              EOF
+                chmod 0755 /host/usr/local/sbin/vip240-arp.sh
+
+                cat >"$SYSD/vip240-arp.service" <<'EOF'
+              [Unit]
+              Description=DPF tenant-API VIP .240 OpenFlow ARP responder
+              After=openvswitch-switch.service
+              Requires=openvswitch-switch.service
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/usr/local/sbin/vip240-arp.sh
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+
+                cat >"$SYSD/vip240-proxy.service" <<EOF
+              [Unit]
+              Description=DPF tenant-API VIP .240 -> ${KAMAJI_BACKEND_IP}:30929 DNAT
+              After=network-online.target vip240-arp.service
+              Requires=vip240-arp.service
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/sbin/iptables -t nat -C PREROUTING -p tcp -d ${TENANT_API_VIP} --dport 30929 -j DNAT --to-destination ${KAMAJI_BACKEND_IP}:30929 || /sbin/iptables -t nat -A PREROUTING -p tcp -d ${TENANT_API_VIP} --dport 30929 -j DNAT --to-destination ${KAMAJI_BACKEND_IP}:30929
+              ExecStart=/sbin/iptables -t nat -C POSTROUTING -p tcp -d ${KAMAJI_BACKEND_IP} --dport 30929 -j MASQUERADE || /sbin/iptables -t nat -A POSTROUTING -p tcp -d ${KAMAJI_BACKEND_IP} --dport 30929 -j MASQUERADE
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+              fi
+
+              # ------- dpf-vf-rename.service (W12) — udev rule -----------------
+              cat >/host/etc/udev/rules.d/70-dpf-vf-rename.rules <<'EOF'
+              # Rename VF1 on the host PF to the dpu-host expected name.
+              SUBSYSTEM=="net", ACTION=="add", DRIVERS=="mlx5_core", ATTR{phys_port_name}=="pf0vf1", NAME="enp14s0f0np0v1"
+              EOF
+
+              # ------- dpf-dpu-clock.service + timer (W15) ---------------------
+              cat >"$SYSD/dpf-dpu-clock.service" <<'EOF'
+              [Unit]
+              Description=Push host epoch to DPU console via rshim
+              [Service]
+              Type=oneshot
+              ExecStart=/bin/sh -c 'for f in /dev/rshim*/misc; do [ -e "$f" ] && echo "SW_DATE $(date +%s)" > "$f" 2>/dev/null; done; exit 0'
+              EOF
+              cat >"$SYSD/dpf-dpu-clock.timer" <<'EOF'
+              [Unit]
+              Description=Run dpf-dpu-clock.service every 30 minutes
+              [Timer]
+              OnBootSec=2min
+              OnUnitActiveSec=30min
+              Unit=dpf-dpu-clock.service
+              [Install]
+              WantedBy=timers.target
+              EOF
+
+              # ------- tinyproxy (gated) ---------------------------------------
+              if [[ "${ENABLE_TINYPROXY,,}" == "true" && ( "${NODE_ROLE:-}" == "" || "${NODE_ROLE:-}" == "true" ) ]]; then
+                nsenter -t 1 -m -p -n apt-get -qq install -y tinyproxy >/dev/null 2>&1 || true
+                cat >/host/etc/tinyproxy/tinyproxy.conf <<'EOF'
+              User tinyproxy
+              Group tinyproxy
+              Port 8888
+              Listen 0.0.0.0
+              MaxClients 256
+              Allow 10.0.0.0/8
+              Allow 172.16.0.0/12
+              ConnectPort 443
+              ConnectPort 563
+              EOF
+              fi
+
+              # ------- enable everything we just wrote -------------------------
+              nsenter -t 1 -m -p -n systemctl daemon-reload
+              for u in dpf-runtime-fixup.service dpf-brdpu-shim.service vip240-arp.service vip240-proxy.service dpf-dpu-clock.timer; do
+                [ -f "$SYSD/$u" ] && nsenter -t 1 -m -p -n systemctl enable --now "$u" 2>/dev/null || true
+              done
+              [[ "${ENABLE_TINYPROXY,,}" == "true" ]] && nsenter -t 1 -m -p -n systemctl enable --now tinyproxy 2>/dev/null || true
+              nsenter -t 1 -m -p -n udevadm control --reload-rules || true
+
+              echo "dpf-egress-glue: units installed; sleeping (reconcile every 60 s)"
+              while true; do
+                sleep 60
+              done
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+            type: Directory

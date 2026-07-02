@@ -1,0 +1,29 @@
+name: dpf-ovnk-hbn-egress-glue-zt
+description: |
+  HBN egress-glue addon (opt-in). Lays down systemd units encoding the
+  load-bearing § B.2 workarounds via a privileged DaemonSet that drops
+  files into /host/etc/systemd/system. Gated by enableEgressGlue=true.
+
+  Implements HBN_PROFILE_PLAN_V2.md § D1.5.4.
+type: add-on
+cloudType: edge-native
+version: "1.0.0"
+labels:
+  tier: addon
+  dpf-mode: zero-trust
+  feature: egress-glue
+  opt-in: "true"
+
+packs:
+  - name: dpf-egress-glue
+    type: manifest
+    layer: addon
+    values: |
+      pack:
+        namespace: dpf-operator-system
+        spectrocloud.com/install-priority: "40"
+        enableEgressGlue: "{{ .spectro.var.enableEgressGlue }}"
+        enableTinyproxy:  "{{ .spectro.var.enableTinyproxy }}"
+        tenantApiVIP:     "{{ .spectro.var.tenantApiVIP }}"
+        kamajiBackendIP:  "{{ .spectro.var.kamajiBackendIP }}"
+    manifestsGlob: manifests/*.yaml
