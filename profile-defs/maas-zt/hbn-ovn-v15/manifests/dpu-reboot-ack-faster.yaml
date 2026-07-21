@@ -1,0 +1,59 @@
+# v13 fix #6: watchdog that clears provisioning.dpu.nvidia.com/dpunode-external-reboot-required
+# as soon as it appears AND the DPU is up (BMC ping-reachable). The existing
+# dpunode-external-reboot-acker in v12 CronJobs every 2 min and often lags
+# behind the state machine.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpu-reboot-ack-faster
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpu-reboot-ack-faster
+rules:
+  - apiGroups: [provisioning.dpu.nvidia.com]
+    resources: [dpunodes, dpus]
+    verbs: [get, list, watch, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpu-reboot-ack-faster
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: dpu-reboot-ack-faster}
+subjects:
+  - kind: ServiceAccount
+    name: dpu-reboot-ack-faster
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dpu-reboot-ack-faster
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: dpu-reboot-ack-faster}}
+  template:
+    metadata: {labels: {app: dpu-reboot-ack-faster}}
+    spec:
+      serviceAccountName: dpu-reboot-ack-faster
+      containers:
+      - name: acker
+        image: bitnami/kubectl:latest
+        command: ["/bin/sh","-c"]
+        args:
+          - |
+            set -eu
+            while true; do
+              for dn in $(kubectl get dpunode -A -o jsonpath='{range .items[?(@.metadata.annotations.provisioning\.dpu\.nvidia\.com/dpunode-external-reboot-required=="true")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+                ns="${dn%/*}"; name="${dn#*/}"
+                kubectl annotate dpunode -n "$ns" "$name" \
+                  provisioning.dpu.nvidia.com/dpunode-external-reboot-required- \
+                  --overwrite >/dev/null 2>&1 \
+                  && echo "cleared external-reboot-required on $ns/$name" || true
+              done
+              sleep 5
+            done
+        resources: {requests: {cpu: 5m, memory: 32Mi}, limits: {cpu: 50m, memory: 64Mi}}

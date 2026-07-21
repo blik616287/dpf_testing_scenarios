@@ -1,0 +1,52 @@
+# v17 EVPN: the NetworkAttachmentDefinition pods use to get an SR-IOV VF, offloaded
+# through DOCA HBN. The VF lands in the EVPN tenant VLAN (L2VNI 10010) which is
+# stretched across both DPUs — so ALL pods share ONE flat /24 (10.10.11.0/24)
+# regardless of vfID or which DPU/host they're on. The anycast SVI 10.10.11.1
+# (same on both DPUs) is the gateway. MTU on net1 should be 8900 (VXLAN overhead).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bench
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: hbn-fabric
+  namespace: bench
+  annotations:
+    # Bind this NAD to the SR-IOV device plugin resource. Multus reads this and
+    # allocates a VF from the pool at CmdAdd time.
+    k8s.v1.cni.cncf.io/resourceName: nvidia.com/bf3_p0_vfs
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "sriov",
+      "name": "hbn-fabric",
+      "vlan": 0,
+      "mtu": 8900,
+      "ipam": {
+        "type": "whereabouts",
+        "range": "10.10.11.0/24",
+        "range_start": "10.10.11.10",
+        "range_end": "10.10.11.250",
+        "gateway": "10.10.11.1"
+      },
+      "capabilities": {"mac": true, "ips": true}
+    }
+# v17 EVPN notes (proven live on cluster 6a5ec3e2 / redeployed on 6a5f0b8c):
+#  1. NO "spoofchk"/"trust". In DPU switchdev/offload mode the eSwitch owns VF
+#     config; the host PF rejects them ("operation not permitted") and sriov aborts.
+#  2. Flat /24 works for ANY vfID because the doca-hbn VF swps (pf0vf0-3_if) are all
+#     VLAN-11 access ports on an EVPN L2VNI (10010) stretched across both DPUs — so
+#     a pod's net1 is L2-adjacent to every other pod in 10.10.11.0/24 regardless of
+#     which VF/DPU it landed on. Gateway 10.10.11.1 is the anycast SVI (same both DPUs).
+#  3. FIX #5: ipam is "whereabouts" (cluster-wide, see host-whereabouts.yaml), NOT
+#     host-local. host-local allocates per-node with no shared state, so pods on
+#     different workers collided on the flat /24 (both got 10.10.11.10). whereabouts
+#     tracks allocations in cluster CRDs -> every pod gets a distinct IP.
+#  4. "mtu": 8900 set in the NAD (9000 underlay - 50B VXLAN) so net1 comes up jumbo
+#     automatically (no manual `ip link set net1 mtu 8900`).

@@ -1,0 +1,75 @@
+kubeadmconfig:
+  preKubeadmCommands:
+    - 'echo "====> Applying pre Kubeadm commands"'
+    # Force specific IP address as the Node InternalIP for kubelet
+    - |
+      apt update && apt install -y grepcidr
+      NETWORKS="{{ .spectro.var.K8sNodeCIDR }}"
+      IPS=$(hostname -I)
+      for IP in $IPS
+      do
+        echo "$IP" | grepcidr "$NETWORKS" >/dev/null && echo " --node-ip=$IP" >> /etc/default/kubelet
+        if [ $? -eq 0 ]; then break; fi
+      done
+    # Install nfs-common for Longhorn
+    - apt install -y nfs-common
+    # Update CA certs
+    - update-ca-certificates
+  postKubeadmCommands:
+    - 'echo "====> Applying post Kubeadm commands"'
+    # Tag CP nodes for Longhorn storage
+    - |
+      if test -f /etc/kubernetes/admin.conf; then
+        kubectl annotate node $(hostname) node.longhorn.io/default-node-tags='["storage"]' --kubeconfig /etc/kubernetes/admin.conf
+      fi
+    # v6: label the CP node with its OVN-K single-node-zone name AT BOOTSTRAP.
+    # ovnkube-single-node-zone mode's get_node_zone() reads k8s.ovn.org/zone-name;
+    # without it ovnkube-node CrashLoops and the CP never goes Ready. Doing this
+    # here (postKubeadm, admin.conf) beats the chicken-egg where the addon-layer
+    # zone-labeler DaemonSet (install-priority 30) can't run until the CP is
+    # already Ready. Retry until the apiserver is reachable. CP only (admin.conf
+    # exists only on the control-plane); workers are labelled by the addon
+    # host-ovnk-zone-labeler DaemonSet (hostNetwork -> runs on NotReady workers)
+    # once the CP is up. NodeRestriction blocks a worker kubelet from setting a
+    # k8s.ovn.org/* label on itself, so worker self-labelling is not possible here.
+    # v19 FIX (papercut #2): label by the ACTUAL registered node name, not
+    # $(hostname). The CP's k8s node name (what ovnkube reads for the zone) may
+    # differ from the OS hostname (case/FQDN/override); labelling $(hostname)
+    # then silently no-ops all 60 retries and the CP never goes Ready. Read the
+    # node object's real name and label THAT.
+    - |
+      if test -f /etc/kubernetes/admin.conf; then
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        for i in $(seq 1 90); do
+          NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [ -n "$NODE" ]; then
+            kubectl label node "$NODE" k8s.ovn.org/zone-name="$NODE" --overwrite && \
+              echo "labeled CP node $NODE with zone-name" && break
+          fi
+          sleep 5
+        done
+      fi
+  files:
+    - targetPath: /usr/local/share/ca-certificates/org_ca.crt
+      targetOwner: "root:root"
+      targetPermissions: "0644"
+      content: |
+        -----BEGIN CERTIFICATE-----
+        MIIDHzCCAgegAwIBAgIUC2VKm0kzJFb8sDxcYIAHpRsrkZwwDQYJKoZIhvcNAQEL
+        BQAwEjEQMA4GA1UEAwwHcm9vdF9jYTAeFw0yMzA1MTUwMjI3MDdaFw0yOTAxMjYx
+        MDI3MzdaMA0xCzAJBgNVBAMTAmNhMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
+        CgKCAQEA1xaF23C53r7hOjAY6lTeNX5aBCaF9scdl/Dt4G16eKLRbGhOxdglk6N1
+        A6nrErJMxk8QIFY33ZBKCDGIvefsDEoHX7J9MTjlSpvXJgyjLsmRUhWvTOnNf+oe
+        xdIC2dRWuU+8y/6JbnaWfx4hYyLbYEguJyrFrFUjwQ1bdJIChnvzRFUV43uKLENC
+        vR/CiWy/v9m7itCl4WmVRw6+4GLv/IYzSc+EWpC4Rr/z8beQT0l+fmAgdakyfuKP
+        Icuo6QhKSszZxGUnVnh5LVKkHGdk9TgGBEEp1Ja6YI9k2ODiugnNMgJbIdf8TmXd
+        jXWCo1Db+6IsrWPqjwCPrrDQolDD6QIDAQABo3IwcDAOBgNVHQ8BAf8EBAMCAQYw
+        DwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUKq7+i3gHH5s3WZGkL5C09SG7fN4w
+        HwYDVR0jBBgwFoAUsuhA2cGXGoYZZzAeJrIVHkkkwFgwDQYDVR0RBAYwBIICY2Ew
+        DQYJKoZIhvcNAQELBQADggEBABsD4LDofyRC2cVas0QlECYfSrJhtIVxD5CsGurO
+        pWpYIvTnC5AMSX5PpWlc3nAnv5OMGs+G+jD4paEQRPofZvjA+fUUMLVNtVOv0p9E
+        Dm5FpgZB1wR1crieejAXDl8wOlO54BBCK/3vkIgtcaUJ3WrOCoI8QU0NEvYhBZW3
+        +vt2oini0M5J5keB3kVKrfuQHQs41yMmWLWpuz5GlX5354IpDoDyeEzx6/Q0Uqhg
+        espKDCkDqjNYIhrhHnhXOW8fGOspOISfDKj5H6bgfKAF3TFfqd5P+AdzZNand8cC
+        euKlWnTpf9FTumw6znzybwsmfUUopmY17mN65V8X91ks15Y=
+        -----END CERTIFICATE-----

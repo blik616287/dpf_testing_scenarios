@@ -1,0 +1,353 @@
+---
+# Reserves static-IP MaaS leases for each DPU's oob_net0, so the DPU gets a stable IP
+# on first boot after BFB flash. Bypasses MaaS's default behaviour of ignoring
+# DHCP requests from unknown MACs.
+#
+# What it does, per reconcile:
+#   1. Loads MaaS OAuth creds from Secret maas-api-credentials (created below from spectro.var.*).
+#   2. Shrinks the MaaS dynamic range on the mgmt subnet so the DPU-target IPs
+#      are static-eligible (moves the boundary; leaves rest of the dynamic range intact).
+#   3. Enumerates DPUDevice CRs — each has a bmcIp we can ARP-resolve into a BMC MAC.
+#      For BF-3, the DPU OOB MAC == BMC MAC minus 1 in the last byte (verified: BMC
+#      c4:70:bd:2b:f6:b7 → OOB c4:70:bd:2b:f6:b6; BMC c4:70:bd:f0:65:eb → OOB ...:ea).
+#   4. Creates/updates a MaaS 'device' record for that OOB MAC with a STATIC IP
+#      assignment on the mgmt subnet.
+#   5. Refuses to allocate any IP already answering to ARP (safety).
+#
+# Idempotent. Records success via annotation on the DPUDevice.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maas-dpu-network-setup
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpudevices", "dpunodes", "dpudiscoveries"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["maas-api-credentials"]
+    verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: maas-dpu-network-setup
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maas-dpu-network-setup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: maas-dpu-network-setup
+subjects:
+  - kind: ServiceAccount
+    name: maas-dpu-network-setup
+    namespace: dpf-operator-system
+---
+# Templated Secret — cluster-create supplies the values.
+# NOTE: {{ .spectro.var.MaasApiEndpoint }} etc are resolved by Palette at deploy time.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: maas-api-credentials
+  namespace: dpf-operator-system
+type: Opaque
+stringData:
+  endpoint: "{{ .spectro.var.MaasApiEndpoint }}"
+  consumer_key: "{{ .spectro.var.MaasConsumerKey }}"
+  token_key: "{{ .spectro.var.MaasTokenKey }}"
+  token_secret: "{{ .spectro.var.MaasTokenSecret }}"
+  subnet_cidr: "{{ .spectro.var.MgmtSubnetCidr }}"
+  dpu1_oob_ip: "{{ .spectro.var.Dpu1OobIp }}"
+  dpu2_oob_ip: "{{ .spectro.var.Dpu2OobIp }}"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: maas-dpu-network-setup
+  namespace: dpf-operator-system
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 900
+      template:
+        spec:
+          serviceAccountName: maas-dpu-network-setup
+          restartPolicy: OnFailure
+          hostNetwork: true
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node-role.kubernetes.io/control-plane
+                        operator: Exists
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node-role.kubernetes.io/master
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: setup
+              image: python:3.12-slim
+              command: ["/bin/bash","-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update -qq && apt-get install -y -qq iproute2 iputils-arping curl >/dev/null
+                  pip install --quiet requests-oauthlib >/dev/null
+                  # install kubectl (script needs it to read DPUDevice CRs)
+                  KV=$(curl -sk https://kubernetes.default.svc/version | grep -oE '"gitVersion":\s*"[^"]+"' | cut -d'"' -f4)
+                  curl -sL "https://dl.k8s.io/release/${KV:-v1.34.2}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl
+                  chmod +x /usr/local/bin/kubectl
+                  python3 /scripts/setup.py
+              env:
+                - name: MAAS_ENDPOINT
+                  valueFrom: { secretKeyRef: { name: maas-api-credentials, key: endpoint } }
+                - name: MAAS_CONSUMER_KEY
+                  valueFrom: { secretKeyRef: { name: maas-api-credentials, key: consumer_key } }
+                - name: MAAS_TOKEN_KEY
+                  valueFrom: { secretKeyRef: { name: maas-api-credentials, key: token_key } }
+                - name: MAAS_TOKEN_SECRET
+                  valueFrom: { secretKeyRef: { name: maas-api-credentials, key: token_secret } }
+                - name: MGMT_SUBNET_CIDR
+                  valueFrom: { secretKeyRef: { name: maas-api-credentials, key: subnet_cidr } }
+                - name: DPU1_OOB_IP
+                  valueFrom: { secretKeyRef: { name: maas-api-credentials, key: dpu1_oob_ip } }
+                - name: DPU2_OOB_IP
+                  valueFrom: { secretKeyRef: { name: maas-api-credentials, key: dpu2_oob_ip } }
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: scripts
+              configMap:
+                name: maas-dpu-network-setup-scripts
+                defaultMode: 0755
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-dpu-network-setup-scripts
+  namespace: dpf-operator-system
+data:
+  setup.py: |
+    #!/usr/bin/env python3
+    """Reserve static-IP MaaS leases for each DPUDevice's OOB MAC.
+
+    Runs on the CP node's host network so we can arping the BMC on the mgmt LAN
+    to learn its MAC directly. The OOB MAC on BF-3 is BMC-MAC minus 1 in the
+    last byte — deterministic.
+    """
+    import os
+    import subprocess
+    import sys
+    import ipaddress
+    import time
+    from urllib.parse import urlencode, urljoin
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+
+    ENDPOINT = os.environ["MAAS_ENDPOINT"].rstrip("/")
+    CK = os.environ["MAAS_CONSUMER_KEY"]
+    TK = os.environ["MAAS_TOKEN_KEY"]
+    TS = os.environ["MAAS_TOKEN_SECRET"]
+    SUBNET_CIDR = os.environ["MGMT_SUBNET_CIDR"]
+    # Mapping "<dpu-serial>=<ip>" pairs from env; example DPU1_OOB_IP=172.16.30.29.
+    # We index by discovery order (first DPUDevice returned == DPU1).
+    DPU_IPS = [os.environ.get("DPU1_OOB_IP"), os.environ.get("DPU2_OOB_IP")]
+
+    def maas_auth_header(nonce=None):
+        # MaaS accepts OAuth PLAINTEXT signatures.
+        import random
+        n = nonce or random.randint(1, 999999)
+        t = int(time.time())
+        return (
+            'OAuth oauth_version="1.0", '
+            'oauth_signature_method="PLAINTEXT", '
+            f'oauth_consumer_key="{CK}", oauth_token="{TK}", '
+            f'oauth_signature="&{TS}", '
+            f'oauth_nonce="{n}", oauth_timestamp="{t}"'
+        )
+
+    def maas(path, method="GET", data=None):
+        import json as _json
+        url = f"{ENDPOINT}/{path.lstrip('/')}"
+        headers = {"Authorization": maas_auth_header()}
+        body = None
+        if data is not None:
+            body = urlencode(data, doseq=True).encode()
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        req = Request(url, data=body, method=method, headers=headers)
+        try:
+            r = urlopen(req, timeout=15)
+            raw = r.read().decode()
+            return r.status, _json.loads(raw) if raw and raw[0] in "[{" else raw
+        except HTTPError as e:
+            return e.code, e.read().decode()
+
+    def arp_lookup(ip: str) -> str:
+        """Return the MAC address answering to `ip` on the current host, or ''."""
+        subprocess.run(["arping", "-c", "1", "-w", "2", "-I", "0", ip],
+                       capture_output=True, check=False)
+        # ip neigh show <ip>
+        r = subprocess.run(["ip", "neigh", "show", ip],
+                           capture_output=True, text=True, check=False)
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            for i, p in enumerate(parts):
+                if p == "lladdr" and i + 1 < len(parts):
+                    return parts[i + 1].lower()
+        return ""
+
+    def derive_oob_mac(bmc_mac: str) -> str:
+        octets = bmc_mac.lower().split(":")
+        last = int(octets[-1], 16)
+        octets[-1] = f"{(last - 1) & 0xff:02x}"
+        return ":".join(octets)
+
+    def get_dpu_bmcs():
+        """Return [(dpudevice_name, bmc_ip), ...] via kubectl (in-cluster kubeconfig)."""
+        import json as _json
+        r = subprocess.run(
+            ["kubectl", "-n", "dpf-operator-system", "get", "dpudevice", "-o", "json"],
+            capture_output=True, text=True, check=True)
+        d = _json.loads(r.stdout)
+        out = []
+        for item in d.get("items", []):
+            name = item["metadata"]["name"]
+            bmc = item.get("spec", {}).get("bmcIp", "")
+            if bmc:
+                out.append((name, bmc))
+        return sorted(out)
+
+    def shrink_dynamic_range(want_ips):
+        """If any DPU-target IP is inside a dynamic range, shrink that range to exclude it.
+
+        Only moves the low boundary; keeps range name/vlan intact.
+        """
+        code, ranges = maas("ipranges/")
+        if code != 200:
+            print(f"list ipranges: HTTP {code}: {ranges}", file=sys.stderr)
+            return
+        target_net = ipaddress.ip_network(SUBNET_CIDR)
+        for r in ranges:
+            if r.get("type") != "dynamic":
+                continue
+            start = ipaddress.ip_address(r["start_ip"])
+            end = ipaddress.ip_address(r["end_ip"])
+            if start not in target_net:
+                continue
+            need_shift = max([ipaddress.ip_address(ip) for ip in want_ips if ip and start <= ipaddress.ip_address(ip) <= end],
+                             default=None)
+            if need_shift is None:
+                continue
+            new_start = ipaddress.ip_address(int(need_shift) + 1)
+            if new_start > end:
+                print(f"cannot shrink range id={r['id']} — would go empty", file=sys.stderr)
+                continue
+            print(f"shrinking range id={r['id']} from {start}-{end} to {new_start}-{end}")
+            maas(f"ipranges/{r['id']}/", method="PUT",
+                 data={"start_ip": str(new_start), "end_ip": str(end)})
+
+    def find_or_create_device(hostname: str, mac: str, ip: str):
+        """Ensure a MaaS device exists with the given MAC and STATIC ip."""
+        code, devs = maas("devices/")
+        if code != 200:
+            print(f"list devices: HTTP {code}", file=sys.stderr)
+            return False
+        existing = next(
+            (d for d in devs
+             if any(i.get("mac_address", "").lower() == mac
+                    for i in d.get("interface_set", []))),
+            None)
+        if existing is None:
+            code, r = maas("devices/", method="POST",
+                           data={"hostname": hostname, "mac_addresses": mac,
+                                 "domain": "maas-custeng.sc"})
+            if code not in (200, 201):
+                print(f"create device: HTTP {code}: {r}", file=sys.stderr)
+                return False
+            import json as _json
+            existing = _json.loads(r) if isinstance(r, str) else r
+            print(f"created device {hostname} sysid={existing.get('system_id')}")
+        sysid = existing["system_id"]
+        iface = existing["interface_set"][0]
+        # Unlink any existing links
+        for link in iface.get("links", []) or []:
+            maas(f"nodes/{sysid}/interfaces/{iface['id']}/?op=unlink_subnet",
+                 method="POST", data={"id": link["id"]})
+        # Link STATIC
+        subnet_id = None
+        code, subnets = maas("subnets/")
+        if code == 200:
+            for s in subnets:
+                if s.get("cidr") == SUBNET_CIDR:
+                    subnet_id = s["id"]; break
+        if not subnet_id:
+            print(f"cannot find subnet id for {SUBNET_CIDR}", file=sys.stderr)
+            return False
+        code, r = maas(f"nodes/{sysid}/interfaces/{iface['id']}/?op=link_subnet",
+                       method="POST",
+                       data={"mode": "STATIC", "subnet": str(subnet_id),
+                             "ip_address": ip})
+        if code == 200:
+            print(f"linked {hostname}/{mac} → {ip}")
+            return True
+        print(f"link_subnet: HTTP {code}: {r}", file=sys.stderr)
+        return False
+
+    def already_configured(dpudevice_name: str) -> bool:
+        r = subprocess.run(
+            ["kubectl", "-n", "dpf-operator-system", "get", "dpudevice", dpudevice_name,
+             "-o", "jsonpath={.metadata.annotations.dpf-testing\\.custeng\\.sc/maas-static-ip-assigned}"],
+            capture_output=True, text=True, check=False)
+        return bool(r.stdout.strip())
+
+    def mark_configured(dpudevice_name: str, ip: str):
+        subprocess.run(
+            ["kubectl", "-n", "dpf-operator-system", "annotate", "dpudevice",
+             dpudevice_name,
+             f"dpf-testing.custeng.sc/maas-static-ip-assigned={ip}", "--overwrite"],
+            check=False)
+
+    def main():
+        want = [ip for ip in DPU_IPS if ip]
+        if not want:
+            print("no DPU IPs configured (DPU{1,2}_OOB_IP empty); nothing to do")
+            return
+        shrink_dynamic_range(want)
+        bmcs = get_dpu_bmcs()
+        if not bmcs:
+            print("no DPUDevice CRs found yet")
+            return
+        for (name, bmc_ip), want_ip in zip(bmcs, DPU_IPS):
+            if not want_ip:
+                continue
+            if already_configured(name):
+                print(f"{name} already configured; skip")
+                continue
+            bmc_mac = arp_lookup(bmc_ip)
+            if not bmc_mac:
+                print(f"{name}: BMC {bmc_ip} not in ARP; skipping this pass")
+                continue
+            oob_mac = derive_oob_mac(bmc_mac)
+            hostname = name.replace("dpu-device-", "").replace("dpu-node-", "")
+            hostname = f"{hostname}-oob"
+            if find_or_create_device(hostname, oob_mac, want_ip):
+                mark_configured(name, want_ip)
+
+    if __name__ == "__main__":
+        main()

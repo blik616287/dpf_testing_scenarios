@@ -1,0 +1,86 @@
+# v14 HBN offload plumbing #3: SR-IOV device plugin on host cluster.
+# Advertises enp14s0f0np0's VFs as `nvidia.com/bf3_p0_vfs`.
+#
+# v14 fixes vs v13:
+# - Same nodeSelector fix as host-bf3-sriov-vfs (Palette doesn't set
+#   node-role.kubernetes.io/worker — use nodeAffinity NotIn control-plane).
+# - Selector simplified to only pfNames — the v13 (vendors+devices+drivers+
+#   pfNames#range) combo caused DP to register 0 devices even though VFs matched;
+#   netDeviceProvider's filter chain rejects them in that combo. Just pfNames
+#   works, and the DP will discover whatever VF count the host DS created.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sriov-device-plugin, namespace: kube-system}
+---
+# v17 FIX (#4, durable): the config.json is GENERATED at runtime by an init
+# container (detect-pf) that discovers PF0 by phys_port_name=p0, instead of
+# hardcoding pfNames: ["eth0"]. The PF netdev name is non-deterministic across
+# reprovisions, so a static name breaks VF discovery (0 devices advertised). No
+# ConfigMap needed — the init writes /etc/pcidp/config.json into a shared emptyDir.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: sriov-device-plugin
+  namespace: kube-system
+  labels: {app: sriov-device-plugin}
+spec:
+  selector: {matchLabels: {name: sriov-device-plugin}}
+  updateStrategy: {type: RollingUpdate}
+  template:
+    metadata:
+      labels: {name: sriov-device-plugin, tier: node}
+      annotations: {pod-security.kubernetes.io/enforce: privileged}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: system-node-critical
+      tolerations: [{operator: Exists}]
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      serviceAccountName: sriov-device-plugin
+      containers:
+      # v17 FIX (#4): detect PF0 (phys_port_name=p0, SR-IOV PF) INLINE and write the
+      # config to a writable path, then exec the plugin with --config-file. Done in
+      # the main container (not an init+emptyDir, which shared unreliably here) so the
+      # PF name is always the actual one, name-agnostic across reprovisions.
+      - name: kube-sriovdp
+        image: ghcr.io/k8snetworkplumbingwg/sriov-network-device-plugin:v3.7.0
+        command: ["/bin/sh","-c"]
+        args:
+          - |
+            set -u
+            find_pf() {
+              for d in /sys/class/net/*; do
+                [ -e "$d/phys_port_name" ] || continue
+                [ "$(cat "$d/phys_port_name" 2>/dev/null)" = "p0" ] || continue
+                tv=$(cat "$d/device/sriov_totalvfs" 2>/dev/null || echo 0)
+                [ "$tv" -gt 0 ] 2>/dev/null || continue
+                basename "$d"; return 0
+              done
+              return 1
+            }
+            PF=""; i=0
+            while [ -z "$PF" ] && [ "$i" -lt 60 ]; do PF=$(find_pf || true); [ -z "$PF" ] && sleep 5; i=$((i+1)); done
+            [ -n "$PF" ] || { echo "PF0 (phys_port_name=p0, SR-IOV) not found"; exit 1; }
+            mkdir -p /tmp/pcidp
+            printf '{"resourceList":[{"resourceName":"bf3_p0_vfs","resourcePrefix":"nvidia.com","selectors":{"pfNames":["%s"]}}]}' "$PF" > /tmp/pcidp/config.json
+            echo "detected PF0=$PF; config:"; cat /tmp/pcidp/config.json; echo
+            exec /usr/bin/sriovdp --config-file /tmp/pcidp/config.json -logtostderr -v 5
+        securityContext: {privileged: true}
+        resources: {requests: {cpu: 25m, memory: 40Mi}, limits: {cpu: 250m, memory: 200Mi}}
+        volumeMounts:
+          - {name: devicesock, mountPath: /var/lib/kubelet/, mountPropagation: Bidirectional}
+          - {name: log, mountPath: /var/log}
+          - {name: sysfs, mountPath: /sys}
+          - {name: device-info, mountPath: /var/run/k8s.cni.cncf.io/devinfo/dp, mountPropagation: Bidirectional}
+      volumes:
+        - {name: devicesock, hostPath: {path: /var/lib/kubelet/}}
+        - {name: log, hostPath: {path: /var/log}}
+        - {name: sysfs, hostPath: {path: /sys}}
+        - {name: device-info, hostPath: {path: /var/run/k8s.cni.cncf.io/devinfo/dp, type: DirectoryOrCreate}}

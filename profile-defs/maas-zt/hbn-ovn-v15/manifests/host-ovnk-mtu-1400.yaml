@@ -1,0 +1,60 @@
+# v13 fix #2: force ovn-kubernetes/ovn-config CM.mtu = 1400.
+# Palette pack default is 8940 which assumes MTU-9000 fabric; on brens1f0 that
+# uplink is MTU 1500 so pods over the OVN-K path drop. Once we swap uplinks to
+# the DPU data port (v13 offload path) we can go back to 8940, but until then
+# 1400 keeps host-CNI pod networking honest.
+# Idempotent Job runs after CNI comes up.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: host-ovnk-mtu-1400
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-ovnk-mtu-1400
+  namespace: ovn-kubernetes
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-ovnk-mtu-1400
+  namespace: ovn-kubernetes
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: host-ovnk-mtu-1400}
+subjects:
+  - kind: ServiceAccount
+    name: host-ovnk-mtu-1400
+    namespace: kube-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: host-ovnk-mtu-1400
+  namespace: kube-system
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: host-ovnk-mtu-1400
+          restartPolicy: Never
+          containers:
+          - name: patch
+            image: bitnami/kubectl:latest
+            command: ["/bin/sh","-c"]
+            args:
+              - |
+                set -eu
+                kubectl -n ovn-kubernetes patch cm ovn-config \
+                  --type=merge -p '{"data":{"mtu":"1400"}}' || true
+            resources: {requests: {cpu: 5m, memory: 32Mi}}

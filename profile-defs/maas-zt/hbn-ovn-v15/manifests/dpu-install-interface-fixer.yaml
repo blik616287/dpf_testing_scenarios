@@ -1,0 +1,100 @@
+# DPF v25.10.1 race condition: hostagent's nodemanager (DaemonSet on workers) overwrites
+# DPUNode.Status.DPUInstallInterface to "hostAgent" unconditionally, racing the DPF main
+# controller which would set it to "redfish" (per --dpu-install-interface=redfish flag).
+# The DPU's own Status.DPUInstallInterface latches at init time from DPUNode, so whichever
+# wrote first wins forever. In ZT mode the answer must be "redfish" — hostAgent path
+# requires host rshim which ZT doesn't have.
+#
+# This CronJob runs every 2 minutes and idempotently:
+#   1. Forces DPUNode.Status.DPUInstallInterface = "redfish" if it's anything else.
+#   2. Forces DPU.Status.DPUInstallInterface = "redfish" on any DPU that still has "hostAgent"
+#      AND is in a phase before "OS Installing" (safe to switch — nothing's been provisioned yet).
+#
+# Why: prevents the race that cost us hours on the baseline cluster.
+# How to apply: deploys with the cluster profile; runs continuously without operator action.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpu-install-interface-fixer
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpunodes", "dpunodes/status", "dpus", "dpus/status"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpu-install-interface-fixer
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpu-install-interface-fixer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpu-install-interface-fixer
+subjects:
+  - kind: ServiceAccount
+    name: dpu-install-interface-fixer
+    namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpu-install-interface-fixer
+  namespace: dpf-operator-system
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          serviceAccountName: dpu-install-interface-fixer
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: alpine/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  NS=dpf-operator-system
+                  TARGET=redfish
+
+                  # 1. Fix DPUNodes with wrong dpuInstallInterface
+                  for n in $(kubectl get dpunode -n $NS -o jsonpath='{range .items[*]}{.metadata.name} {end}'); do
+                    cur=$(kubectl get dpunode -n $NS "$n" -o jsonpath='{.status.dpuInstallInterface}')
+                    if [ -n "$cur" ] && [ "$cur" != "$TARGET" ]; then
+                      echo "[$(date -Iseconds)] DPUNode $n: $cur -> $TARGET"
+                      kubectl patch dpunode -n $NS "$n" --subresource=status --type=merge \
+                        -p "{\"status\":{\"dpuInstallInterface\":\"$TARGET\"}}"
+                    fi
+                  done
+
+                  # 2. Fix DPUs that latched to hostAgent before reaching OS Installing
+                  for d in $(kubectl get dpu -n $NS -o jsonpath='{range .items[*]}{.metadata.name} {end}'); do
+                    cur=$(kubectl get dpu -n $NS "$d" -o jsonpath='{.status.dpuInstallInterface}')
+                    phase=$(kubectl get dpu -n $NS "$d" -o jsonpath='{.status.phase}')
+                    case "$phase" in
+                      "Pending"|"Initializing"|"Node Effect"|"Preparing BFB"|"")
+                        if [ -n "$cur" ] && [ "$cur" != "$TARGET" ]; then
+                          echo "[$(date -Iseconds)] DPU $d (phase=$phase): $cur -> $TARGET"
+                          kubectl patch dpu -n $NS "$d" --subresource=status --type=merge \
+                            -p "{\"status\":{\"dpuInstallInterface\":\"$TARGET\"}}"
+                        fi
+                        ;;
+                      *)
+                        # too late to switch; DPU has already started provisioning down the wrong path
+                        ;;
+                    esac
+                  done
+                  echo "[$(date -Iseconds)] done"

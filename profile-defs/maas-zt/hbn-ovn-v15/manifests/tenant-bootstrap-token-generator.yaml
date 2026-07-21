@@ -1,0 +1,134 @@
+# Companion to 02-tenant-bootstrap-token-keeper.yaml.
+#
+# The keeper EXTENDS existing bootstrap-token Secrets in the tenant cluster (so
+# tokens already in DPU bfcfgs stay valid). But if no tokens exist (e.g., they
+# were already deleted by tokencleaner before the keeper started), there is
+# nothing to extend — the keeper does nothing and DPUs cannot join.
+#
+# This generator ensures there is ALWAYS at least one fresh, valid bootstrap
+# token in the tenant cluster's kube-system namespace, so any new DPU coming
+# online can fetch it via the cluster-info ConfigMap signed JWS.
+#
+# It runs every 30 minutes and:
+#   1. Checks if at least one bootstrap-token-* Secret exists in kube-system
+#      with expiration > 1 hour from now.
+#   2. If yes, exits (the keeper will extend it).
+#   3. If no, generates a new token (24h TTL), creates the Secret, which causes
+#      kube-controller-manager's bootstrap-signer to publish a JWS in
+#      kube-public/cluster-info.
+#
+# This prevents the failure mode where:
+#   - Keeper has been crashing (e.g., bash-vs-sh image bug).
+#   - All tokens expire and tokencleaner deletes them.
+#   - Now there are NO tokens for new DPUs to join with.
+#
+# Why: belt-and-suspenders against token starvation. Pair with the keeper.
+# How to apply: deploys with the cluster profile; runs every 30 min, idempotent.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpf-bootstrap-token-generator
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dpf-bootstrap-token-generator-tenant-kubeconfig
+  namespace: dpu-cplane-tenant1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dpf-bootstrap-token-keeper-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: dpf-bootstrap-token-generator
+    namespace: dpf-operator-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpf-bootstrap-token-generator
+  namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpf-bootstrap-token-generator
+  namespace: dpf-operator-system
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 1800
+      template:
+        spec:
+          serviceAccountName: dpf-bootstrap-token-generator
+          restartPolicy: OnFailure
+          containers:
+            - name: gen
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  echo "[$(date -u +%FT%TZ)] dpf-bootstrap-token-generator run"
+
+                  # Pull tenant admin kubeconfig from host cluster Secret.
+                  kubectl -n dpu-cplane-tenant1 get secret dpu-cplane-tenant1-admin-kubeconfig \
+                    -o jsonpath='{.data.admin\.conf}' | base64 -d > /tmp/tenant.kubeconfig
+                  export KUBECONFIG=/tmp/tenant.kubeconfig
+
+                  # Find any bootstrap token with at least 1 hour of life left.
+                  THRESHOLD=$(date -u -d '+1 hour' +%s)
+                  HAS_VALID=0
+                  for s in $(kubectl -n kube-system get secret -o name 2>/dev/null | grep '^secret/bootstrap-token-' || true); do
+                    exp=$(kubectl -n kube-system get $s -o jsonpath='{.data.expiration}' 2>/dev/null | base64 -d || echo "")
+                    [ -z "$exp" ] && continue
+                    exp_epoch=$(date -u -d "$exp" +%s 2>/dev/null || echo 0)
+                    if [ "$exp_epoch" -gt "$THRESHOLD" ]; then
+                      HAS_VALID=1
+                      echo "  $s expires $exp (>1h ahead) — sufficient"
+                      break
+                    fi
+                  done
+
+                  if [ "$HAS_VALID" = "1" ]; then
+                    echo "  at least one valid token already exists — nothing to do"
+                    exit 0
+                  fi
+
+                  echo "  no valid token found, generating fresh one"
+                  TID=$(head -c 6 /dev/urandom | od -A n -t x1 | tr -d ' \n' | head -c 6)
+                  TSEC=$(head -c 8 /dev/urandom | od -A n -t x1 | tr -d ' \n' | head -c 16)
+                  EXP=$(date -u -d '+24 hours' +%Y-%m-%dT%H:%M:%SZ)
+
+                  cat <<EOF | kubectl apply -f -
+                  apiVersion: v1
+                  kind: Secret
+                  metadata:
+                    name: bootstrap-token-${TID}
+                    namespace: kube-system
+                    labels:
+                      dpf.spectrocloud.com/auto-generated: "true"
+                  type: bootstrap.kubernetes.io/token
+                  stringData:
+                    description: "DPF auto-generated (no valid token found)"
+                    token-id: "${TID}"
+                    token-secret: "${TSEC}"
+                    expiration: "${EXP}"
+                    usage-bootstrap-authentication: "true"
+                    usage-bootstrap-signing: "true"
+                    auth-extra-groups: "system:bootstrappers:kubeadm:default-node-token"
+                  EOF
+                  echo "  created bootstrap-token-${TID}, expires ${EXP}"
+                  echo "[$(date -u +%FT%TZ)] done"
