@@ -1,0 +1,94 @@
+# v14 HBN offload plumbing #1: create SR-IOV VFs on the host-facing BlueField
+# PF0 (enp14s0f0np0) on each worker.
+# NUM_OF_VFS in the DPU nvconfig is 46; we spin 16 by default.
+#
+# v14 fixes vs v13:
+# - nodeSelector node-role.kubernetes.io/worker doesn't exist on Palette nodes;
+#   use nodeAffinity NotIn control-plane instead.
+# - After creating VFs, `ip link set enp14s0f0v* up` so the netdevs become
+#   visible to /sys/class/net enumeration — the SR-IOV device plugin's
+#   netDeviceProvider walks /sys/class/net and DOWN-only netdevs get skipped.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: host-bf3-sriov-vfs
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels: {app: host-bf3-sriov-vfs}
+  template:
+    metadata:
+      labels: {app: host-bf3-sriov-vfs}
+      annotations: {pod-security.kubernetes.io/enforce: privileged}
+    spec:
+      priorityClassName: system-node-critical
+      tolerations: [{operator: Exists}]
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      containers:
+      - name: vfset
+        image: busybox:1.36
+        env:
+          # v17 FIX (#4, durable): DO NOT hardcode the PF name. The host-facing BF3
+          # PF0 netdev name is non-deterministic across reprovisions (eth0 on one
+          # deploy, enp14s0f0np0 on another, enp<slot>s0f0np0 on other hardware).
+          # We instead DETECT PF0 at runtime as the netdev whose phys_port_name is
+          # "p0" AND that is an SR-IOV PF (has device/sriov_totalvfs > 0). VF netdevs
+          # are then found via the PF's own device/virtfn* links (PCI-name-agnostic).
+          - name: VFS_TO_CREATE
+            value: "4"
+        command: ["sh","-c"]
+        args:
+          - |
+            set -u
+            # Detect the BF3 host PF0: phys_port_name==p0 and an SR-IOV PF.
+            find_pf() {
+              for d in /sys/class/net/*; do
+                [ -e "$d/phys_port_name" ] || continue
+                [ "$(cat "$d/phys_port_name" 2>/dev/null)" = "p0" ] || continue
+                tv=$(cat "$d/device/sriov_totalvfs" 2>/dev/null || echo 0)
+                [ "$tv" -gt 0 ] 2>/dev/null || continue
+                basename "$d"; return 0
+              done
+              return 1
+            }
+            while true; do
+              PF=$(find_pf || true)
+              if [ -n "${PF:-}" ] && [ -e "/sys/class/net/$PF/device/sriov_numvfs" ]; then
+                CUR=$(cat "/sys/class/net/$PF/device/sriov_numvfs")
+                if [ "$CUR" != "$VFS_TO_CREATE" ]; then
+                  echo 0 > "/sys/class/net/$PF/device/sriov_numvfs" 2>/dev/null || true
+                  sleep 2
+                  echo "$VFS_TO_CREATE" > "/sys/class/net/$PF/device/sriov_numvfs" || true
+                  echo "detected PF=$PF, set sriov_numvfs=$VFS_TO_CREATE"
+                  sleep 3
+                fi
+                # Bring every VF of THIS PF up (via virtfn links, name-agnostic) so
+                # sriov-device-plugin's netDeviceProvider (walks /sys/class/net,
+                # skips DOWN-only devs) enumerates them.
+                for vf in /sys/class/net/$PF/device/virtfn*; do
+                  [ -e "$vf/net" ] || continue
+                  for IF in $(ls "$vf/net" 2>/dev/null); do
+                    ip link set "$IF" up 2>/dev/null || true
+                  done
+                done
+              else
+                echo "PF0 (phys_port_name=p0, SR-IOV) not found yet; retrying"
+              fi
+              sleep 30
+            done
+        securityContext: {privileged: true}
+        volumeMounts:
+          - {name: sysfs, mountPath: /sys}
+        resources: {requests: {cpu: 5m, memory: 16Mi}, limits: {cpu: 50m, memory: 32Mi}}
+      volumes:
+        - name: sysfs
+          hostPath: {path: /sys}

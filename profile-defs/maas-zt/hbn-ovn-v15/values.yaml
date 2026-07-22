@@ -1,0 +1,828 @@
+pack:
+  releaseNameOverride:
+    dpf-deployment: dpf-deployment
+  namespace: dpf-operator-system
+  content:
+    images: []
+  spectrocloud.com/install-priority: "30"
+
+charts:
+  dpf-deployment:
+    bfb:
+      url: "{{.spectro.var.BfbUrl}}"
+
+    dpuFlavors:
+      - name: hbn-v25.10.1
+        dpuMode: zero-trust
+        grub:
+          kernelParameters:
+            - console=hvc0
+            - console=ttyAMA0
+            - earlycon=pl011,0x13010000
+            - fixrttc
+            - net.ifnames=0
+            - biosdevname=0
+            - iommu.passthrough=1
+            - cgroup_no_v1=net_prio,net_cls
+            - hugepagesz=2048kB
+            - hugepages=3072
+        nvconfig:
+          - device: "*"
+            parameters:
+              - PF_BAR2_ENABLE=0
+              - PER_PF_NUM_SF=1
+              - PF_TOTAL_SF=40
+              - PF_SF_BAR_SIZE=10
+              - NUM_PF_MSIX_VALID=0
+              - PF_NUM_PF_MSIX_VALID=1
+              - PF_NUM_PF_MSIX=228
+              - INTERNAL_CPU_MODEL=1
+              - INTERNAL_CPU_OFFLOAD_ENGINE=0
+              - SRIOV_EN=1
+              - NUM_OF_VFS=46
+              - LAG_RESOURCE_ALLOCATION=1
+              - LINK_TYPE_P1=ETH
+              - LINK_TYPE_P2=ETH
+              - EXP_ROM_UEFI_x86_ENABLE=1
+        ovs:
+          rawConfigScript: |
+            _ovs-vsctl() {
+              ovs-vsctl --no-wait --timeout 15 "$@"
+            }
+
+            _ovs-vsctl set Open_vSwitch . other_config:doca-init=true
+            _ovs-vsctl set Open_vSwitch . other_config:dpdk-max-memzones=50000
+            _ovs-vsctl set Open_vSwitch . other_config:hw-offload=true
+            _ovs-vsctl set Open_vSwitch . other_config:pmd-quiet-idle=true
+            _ovs-vsctl set Open_vSwitch . other_config:max-idle=20000
+            _ovs-vsctl set Open_vSwitch . other_config:max-revalidator=5000
+            _ovs-vsctl --if-exists del-br ovsbr1
+            _ovs-vsctl --if-exists del-br ovsbr2
+            _ovs-vsctl --may-exist add-br br-sfc
+            _ovs-vsctl set bridge br-sfc datapath_type=netdev
+            _ovs-vsctl set bridge br-sfc fail_mode=secure
+            _ovs-vsctl --may-exist add-port br-sfc p0
+            _ovs-vsctl set Interface p0 type=dpdk
+            _ovs-vsctl set Interface p0 mtu_request=9216
+            _ovs-vsctl set Port p0 external_ids:dpf-type=physical
+            _ovs-vsctl --may-exist add-port br-sfc p1
+            _ovs-vsctl set Interface p1 type=dpdk
+            _ovs-vsctl set Interface p1 mtu_request=9216
+            _ovs-vsctl set Port p1 external_ids:dpf-type=physical
+            _ovs-vsctl --may-exist add-br br-hbn
+            _ovs-vsctl set bridge br-hbn datapath_type=netdev
+            _ovs-vsctl set bridge br-hbn fail_mode=secure
+            # v15 CORRECTION: do NOT manually add pf0hpf to br-hbn. The official
+            # DPF ZT-HBN "Using PFs" model (NVIDIA/doca-platform
+            # docs/public/user-guides/zero-trust/use-cases/hbn) wires the host
+            # PF0 representor via SFC, not a raw OVS port. A raw pf0hpf on br-hbn
+            # stays operationally DOWN in HBN and never routes (v14 dead-ended
+            # here). Instead: DPUServiceInterface `pf0hpf` (interfaceType: pf,
+            # pfID 0) + a ServiceChain switch pf0hpf <-> doca-hbn pf0hpf_if, and
+            # pf0hpf_if is an HBN SF-backed swp with an IP (see below). The
+            # sfc-controller then eSwitch-offloads pf0hpf -> pf0hpf_if -> HBN.
+            # br-ovn also removed (no DPU-side OVN in this profile).
+            # v13: br-ovn removed with the OVN DPUService (see main comment
+            # block above at dpuServiceTemplates).
+        bfcfgParameters:
+          - UPDATE_ATF_UEFI=yes
+          - UPDATE_DPU_OS=yes
+          - WITH_NIC_FW_UPDATE=yes
+        configFiles:
+          - path: /etc/mellanox/mlnx-bf.conf
+            operation: override
+            raw: |
+              ALLOW_SHARED_RQ="no"
+              IPSEC_FULL_OFFLOAD="no"
+              ENABLE_ESWITCH_MULTIPORT="yes"
+            permissions: "0644"
+          - path: /etc/mellanox/mlnx-ovs.conf
+            operation: override
+            raw: |
+              CREATE_OVS_BRIDGES="no"
+              OVS_DOCA="yes"
+            permissions: "0644"
+          - path: /etc/mellanox/mlnx-sf.conf
+            operation: override
+            raw: ""
+            permissions: "0644"
+          # Explicit default-route fallback for oob_net0.
+          # MaaS device-registered STATIC IPs don't receive a DHCP-served default route,
+          # so this fallback (metric 200) is needed. DHCP-provided routes still win when
+          # present (metric 100 via dhcp4-overrides).
+          - path: /etc/netplan/99-oob-default-route.yaml
+            operation: override
+            permissions: "0600"
+            raw: |
+              network:
+                renderer: networkd
+                version: 2
+                ethernets:
+                  oob_net0:
+                    dhcp4: true
+                    dhcp4-overrides:
+                      use-routes: true
+                      route-metric: 100
+                    routes:
+                      - to: default
+                        via: {{.spectro.var.MgmtGateway}}
+                        metric: 200
+          # ---------------------------------------------------------------
+          # DURABLE FIX for the recurring "DPU never joins after flash" gate.
+          #
+          # ROOT CAUSE: on first boot after a BFB flash the oob_net0 link comes
+          # up administratively DOWN (no carrier brought up by networkd in time).
+          # Because oob_net0 never gets a DHCP lease, systemd's
+          # network-online.target never fires, so NONE of the bf.cfg boot
+          # services that depend on it run -- including the DPF kubeadm-join
+          # service. The DPU sits at "DPU Cluster Config" forever. The stock
+          # DPF ZT flow papers over this with a HOST POWER-CYCLE after flash
+          # (which re-inits the link); we have no host IPMI, so previously this
+          # required a manual BMC-SOL login to `ip link set oob_net0 up` +
+          # dhclient + re-run /opt/dpf/join_k8s_cluster.sh on EVERY deploy.
+          # (The maas-dpu-network-setup CronJob only reserves MaaS IP leases --
+          # it CANNOT bring a down link up, so it never fixed this.)
+          #
+          # FIX: a self-contained systemd oneshot that force-ups oob_net0 and
+          # kicks DHCP early in boot, independent of network-online.target.
+          # v17 FIX (papercut #3): the unit DEFINITION must live on systemd's search
+          # path (/etc/systemd/system/dpf-oob-fixup.service) — a real unit file placed
+          # ONLY in a .wants/ dir was loaded as `not-found` on this systemd (v18: the
+          # service never ran, oob stayed down, and EVERY boot service gated on
+          # network-online.target — kubeadm-join, configure-sfs, hugepages, OVS —
+          # was blocked, forcing a manual BMC-SOL bring-up). We now write the unit to
+          # the search path AND a copy into multi-user.target.wants/ for enablement
+          # (no `systemctl enable` runs during BFB customization). Bringing oob up
+          # EARLY (before systemd-networkd-wait-online) lets network-online.target
+          # fire, which unblocks the whole boot cascade automatically.
+          # Takes effect on the NEXT flash only (configFiles applied during BFB build).
+          - path: /usr/local/sbin/dpf-oob-fixup.sh
+            operation: override
+            permissions: "0755"
+            raw: |
+              #!/bin/bash
+              # Bring oob_net0 up + acquire a lease so network-online.target fires and
+              # the gated DPF boot services (join/SF/hugepages/OVS) run without a
+              # host power-cycle or BMC-SOL login.
+              set +e
+              for i in $(seq 1 60); do
+                ip link show oob_net0 >/dev/null 2>&1 && break
+                sleep 2
+              done
+              ip link set oob_net0 up
+              # If networkd/netplan hasn't leased yet, kick a non-blocking dhclient.
+              for i in $(seq 1 30); do
+                ip -4 addr show oob_net0 | grep -q 'inet ' && break
+                dhclient -nw oob_net0 >/dev/null 2>&1
+                sleep 2
+              done
+              exit 0
+          # The unit DEFINITION on the search path (this is the v17 fix).
+          - path: /etc/systemd/system/dpf-oob-fixup.service
+            operation: override
+            permissions: "0644"
+            raw: |
+              [Unit]
+              Description=DPF oob_net0 link + DHCP fixup (unblocks kubeadm-join without host power-cycle)
+              Wants=network-pre.target
+              Before=network-pre.target systemd-networkd-wait-online.service
+              After=systemd-udevd.service
+              DefaultDependencies=no
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/usr/local/sbin/dpf-oob-fixup.sh
+
+              [Install]
+              WantedBy=multi-user.target
+          # Enablement copy in the target's .wants/ (systemd adds the Wants dep and
+          # loads the unit by name from the search-path definition above).
+          - path: /etc/systemd/system/multi-user.target.wants/dpf-oob-fixup.service
+            operation: override
+            permissions: "0644"
+            raw: |
+              [Unit]
+              Description=DPF oob_net0 link + DHCP fixup (unblocks kubeadm-join without host power-cycle)
+              Wants=network-pre.target
+              Before=network-pre.target systemd-networkd-wait-online.service
+              After=systemd-udevd.service
+              DefaultDependencies=no
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/usr/local/sbin/dpf-oob-fixup.sh
+
+              [Install]
+              WantedBy=multi-user.target
+
+          # v17 FIX (uplink ECMP): enable mlx5 MULTIPORT ESWITCH (esw_multiport) on
+          # the two BF3 uplink PFs BEFORE the HBN dataplane starts. Without it the
+          # originating VTEP binds its self-originated VXLAN to a SINGLE uplink (the
+          # mlx5 multipath LAG stays disabled) -> pod-VF EVPN traffic uses only one
+          # 40G uplink (~39 Gbit/s). With it, the LAG comes up multiport_eswitch/mpesw
+          # and VXLAN ECMP-hashes across BOTH uplinks (~64 Gbit/s, PROVEN). Per DOCA
+          # HBN docs this MUST be set before the dataplane service + needs a
+          # power-cycle to take effect — so it's a boot oneshot ordered before
+          # kubelet, and the DPU's first boot after the BFB flash IS that clean init.
+          # (LAG_RESOURCE_ALLOCATION=1 fw prereq is already set on BF3.) Toggling this
+          # at runtime on a live HBN breaks BGP — only set it at boot.
+          - path: /usr/local/sbin/dpf-esw-multiport.sh
+            operation: override
+            permissions: "0755"
+            raw: |
+              #!/bin/bash
+              set +e
+              # Wait for the two uplink PFs to appear, then enable multiport eswitch.
+              for i in $(seq 1 60); do
+                [ -e /sys/bus/pci/devices/0000:03:00.0/net ] && [ -e /sys/bus/pci/devices/0000:03:00.1/net ] && break
+                sleep 2
+              done
+              for pf in 0000:03:00.0 0000:03:00.1; do
+                devlink dev eswitch set pci/$pf mode switchdev 2>/dev/null
+                devlink dev param set pci/$pf name esw_multiport value true cmode runtime 2>/dev/null
+              done
+              logger "dpf-esw-multiport: lag=$(cat /sys/kernel/debug/mlx5/0000:03:00.0/lag/state 2>/dev/null)"
+              exit 0
+          - path: /etc/systemd/system/dpf-esw-multiport.service
+            operation: override
+            permissions: "0644"
+            raw: |
+              [Unit]
+              Description=Enable mlx5 multiport eSwitch for HBN uplink ECMP (before dataplane)
+              After=sys-subsystem-net-devices-p0.device
+              Before=kubelet.service containerd.service
+              Wants=network-pre.target
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/usr/local/sbin/dpf-esw-multiport.sh
+
+              [Install]
+              WantedBy=multi-user.target
+          - path: /etc/systemd/system/multi-user.target.wants/dpf-esw-multiport.service
+            operation: override
+            permissions: "0644"
+            raw: |
+              [Unit]
+              Description=Enable mlx5 multiport eSwitch for HBN uplink ECMP (before dataplane)
+              After=sys-subsystem-net-devices-p0.device
+              Before=kubelet.service containerd.service
+              Wants=network-pre.target
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/usr/local/sbin/dpf-esw-multiport.sh
+
+              [Install]
+              WantedBy=multi-user.target
+
+    dpuSets: []
+
+    dpuServiceTemplates:
+      - name: doca-hbn
+        deploymentServiceName: doca-hbn
+        helmChart:
+          source:
+            repoURL: https://helm.ngc.nvidia.com/nvidia/doca
+            version: "{{.spectro.var.HbnChartVersion}}"
+            chart: doca-hbn
+          values:
+            image:
+              repository: nvcr.io/nvidia/doca/doca_hbn
+              tag: "{{.spectro.var.HbnImageTag}}"
+            resources:
+              memory: 6Gi
+              # v15 pod-VF: 5 SFs for p0_if/p1_if/pf0hpf_if(+headroom) plus 4 more
+              # for the pod-VF offload swps pf0vf0_if..pf0vf3_if = 9.
+              nvidia.com/bf_sf: 9
+
+      # v12: DPU-side OVN removed. The DPF v25.10.1 ovn-kubernetes-chart image
+      # (ghcr.io/nvidia/ovn-kubernetes:v25.7.0) in "dpu" mode expects SR-IOV VF
+      # representors (pf0vf0, ...) that this BFB doesn't create (SF-based
+      # topology only). Multiple downstream defects also fought us in v11:
+      #   - ovn-dpu Secret CA = HOST cluster CA (not tenant Kamaji CA)
+      #   - dpu-cplane-*-ovn-*-config CM has k8s_apiserver=https://:6443
+      #   - NBDB/SBDB NB_Global.name and options[name] init to short hostname,
+      #     controller expects the FULL k8s node name
+      #   - readiness probe reads /etc/cni/net.d/10-ovn-kubernetes.conf which
+      #     isn't installed in DPU mode
+      # See memories: dpf-ovn-dpu-{secret-ca-bug,config-apiserver-empty,nbdb-zone-rename,brcomch-setup}
+      # v12 ships HBN L3 fabric only. Cross-DPU pod-to-pod goes host CNI
+      # (OVN-K on host) → optional SR-IOV VF on pf0hpf (via multus) → HBN → leaf.
+
+    dpuServiceConfigurations:
+      - name: doca-hbn
+        deploymentServiceName: doca-hbn
+        upgradePolicy:
+          applyNodeEffect: false
+        serviceConfiguration:
+          serviceDaemonSet:
+            annotations:
+              # v15: multus attachments for the HBN pod's SF interfaces. Per the
+              # official ZT-HBN "Using PFs" model the host-facing interface is
+              # pf0hpf_if (backed by an SF, IP from pool1 w/ default gateway),
+              # NOT pf2dpu2_if (that was the OVN/pod-veth path, removed with OVN).
+              k8s.v1.cni.cncf.io/networks: |-
+                [
+                  {"name": "iprequest", "namespace": "dpf-operator-system", "interface": "ip_lo", "cni-args": {"poolNames": ["loopback"], "poolType": "cidrpool"}},
+                  {"name": "iprequest", "namespace": "dpf-operator-system", "interface": "ip_pf0hpf", "cni-args": {"poolNames": ["pool1"], "poolType": "cidrpool", "allocateDefaultGateway": true}},
+                  {"name": "mybrhbn", "namespace": "dpf-operator-system", "interface": "p0_if", "cni-args": {"mtu": 9216}},
+                  {"name": "mybrhbn", "namespace": "dpf-operator-system", "interface": "p1_if", "cni-args": {"mtu": 9216}},
+                  {"name": "mybrhbn", "namespace": "dpf-operator-system", "interface": "pf0hpf_if", "cni-args": {"mtu": 9216}},
+                  {"name": "mybrhbn", "namespace": "dpf-operator-system", "interface": "pf0vf0_if", "cni-args": {"mtu": 9216}},
+                  {"name": "mybrhbn", "namespace": "dpf-operator-system", "interface": "pf0vf1_if", "cni-args": {"mtu": 9216}},
+                  {"name": "mybrhbn", "namespace": "dpf-operator-system", "interface": "pf0vf2_if", "cni-args": {"mtu": 9216}},
+                  {"name": "mybrhbn", "namespace": "dpf-operator-system", "interface": "pf0vf3_if", "cni-args": {"mtu": 9216}}
+                ]
+          helmChart:
+            values:
+              configuration:
+                perDPUValuesYAML: |
+                  - hostnamePattern: "*"
+                    values:
+                      bgp_peer_group: hbn
+                      leaf_asn: {{.spectro.var.FabricLeafAsn}}
+                      # v17 EVPN (shared): the pod tenant VLAN -> L2VNI, and the
+                      # anycast SVI gateway (SAME IP on both DPUs). Pods attach to
+                      # any VF (all VF swps are VLAN-11 access ports) and get a flat
+                      # 10.10.11.0/24 address; cross-DPU is L2-stretched via VXLAN.
+                      pod_vlan: 11
+                      pod_l2vni: 10010
+                      pod_svi_ip: "10.10.11.1/24"
+                  - hostnamePattern: "{{.spectro.var.Dpu1HostnamePattern}}"
+                    values:
+                      bgp_autonomous_system: {{.spectro.var.Dpu1BgpAsn}}
+                      p0_local_ip: "{{.spectro.var.Dpu1P0LocalIp}}"
+                      p0_peer_ip: "{{.spectro.var.Dpu1P0PeerIp}}"
+                      p1_local_ip: "{{.spectro.var.Dpu1P1LocalIp}}"
+                      p1_peer_ip: "{{.spectro.var.Dpu1P1PeerIp}}"
+                      # v17 EVPN: deterministic loopbacks (VTEP + router-id) so each
+                      # DPU knows the peer's for the DIRECT DPU-to-DPU EVPN session
+                      # (our leaf does NOT speak EVPN — l2vpn-evpn NoNeg — so the DPUs
+                      # peer l2vpn-evpn multihop loopback-to-loopback; the leaf just
+                      # IP-forwards the VXLAN).
+                      self_lo: "{{.spectro.var.Dpu1LoopbackIp}}"
+                      peer_lo: "{{.spectro.var.Dpu2LoopbackIp}}"
+                      peer_asn: {{.spectro.var.Dpu2BgpAsn}}
+                  - hostnamePattern: "{{.spectro.var.Dpu2HostnamePattern}}"
+                    values:
+                      bgp_autonomous_system: {{.spectro.var.Dpu2BgpAsn}}
+                      p0_local_ip: "{{.spectro.var.Dpu2P0LocalIp}}"
+                      p0_peer_ip: "{{.spectro.var.Dpu2P0PeerIp}}"
+                      p1_local_ip: "{{.spectro.var.Dpu2P1LocalIp}}"
+                      p1_peer_ip: "{{.spectro.var.Dpu2P1PeerIp}}"
+                      self_lo: "{{.spectro.var.Dpu2LoopbackIp}}"
+                      peer_lo: "{{.spectro.var.Dpu1LoopbackIp}}"
+                      peer_asn: {{.spectro.var.Dpu1BgpAsn}}
+
+              # Numbered /31 eBGP on BOTH p0 and p1 (4-uplink ECMP per §7).
+              # No EVPN/VXLAN, no VLAN tenants — pure IPv4 unicast underlay.
+              # aspath-ignore ON so ECMP works across identical-AS-length paths.
+                startupYAMLJ2: |
+                  - header:
+                      model: bluefield
+                      nvue-api-version: nvue_v1
+                      rev-id: 1.0
+                      version: HBN 2.4.0
+
+                  - set:
+                      interface:
+                        lo:
+                          ip:
+                            address:
+                              {{ config.self_lo }}/32: {}
+                          type: loopback
+
+                        p0_if:
+                          type: swp
+                          link:
+                            mtu: {{.spectro.var.HbnSwpMTU}}
+                          ip:
+                            address:
+                              {{ config.p0_local_ip }}/31: {}
+
+                        p1_if:
+                          type: swp
+                          link:
+                            mtu: {{.spectro.var.HbnSwpMTU}}
+                          ip:
+                            address:
+                              {{ config.p1_local_ip }}/31: {}
+
+                        # v15 CORRECT HBN OFFLOAD: pf0hpf_if is the SF-backed HBN
+                        # swp for the host PF0 dataplane. The host's enp14s0f0np0
+                        # (its side of PF0) sends into the DPU's pf0hpf
+                        # representor, which the ServiceChain (pf0hpf <->
+                        # pf0hpf_if) hardware-offloads onto this swp. HBN L3-routes
+                        # it and `redistribute connected` (below) advertises this
+                        # /29 to the leaf over p0_if/p1_if so it reaches the other
+                        # DPU's pf0hpf_if. Default VRF (our fabric is /31 numbered
+                        # ipv4-unicast, not EVPN, so no VRF/L3VNI isolation needed;
+                        # the reference RED/BLUE VRFs are only for EVPN fabrics).
+                        # IP from pool1 via multus ip_pf0hpf (allocateDefaultGateway).
+                        pf0hpf_if:
+                          type: swp
+                          link:
+                            mtu: {{.spectro.var.HbnSwpMTU}}
+                          ip:
+                            address:
+                              {{ ipaddresses.ip_pf0hpf.cidr }}: {}
+
+                        # v17 EVPN POD-VF OFFLOAD (NVIDIA-reference, proven live):
+                        # the 4 VF swps are L2 BRIDGE ACCESS PORTS in VLAN {{ config.pod_vlan }}
+                        # (mapped to L2VNI {{ config.pod_l2vni }}), NOT L3 swps. A pod on any
+                        # worker gets ANY VF as net1 (multus+sriov); its representor
+                        # pf0vf<N> is ServiceChain-wired to pf0vf<N>_if which drops it
+                        # into the tenant VLAN. The VLAN is stretched across BOTH DPUs
+                        # via VXLAN/EVPN, so pods on different DPUs are L2-adjacent in a
+                        # flat 10.10.11.0/24 — any pod, any vfID, ONE NAD, no per-VF
+                        # subnet or matched routes. HW VXLAN offload on the BF3 eSwitch.
+                        pf0vf0_if: {type: swp, link: {mtu: {{.spectro.var.HbnSwpMTU}}}, bridge: {domain: {br_default: {access: {{ config.pod_vlan }}}}}}
+                        pf0vf1_if: {type: swp, link: {mtu: {{.spectro.var.HbnSwpMTU}}}, bridge: {domain: {br_default: {access: {{ config.pod_vlan }}}}}}
+                        pf0vf2_if: {type: swp, link: {mtu: {{.spectro.var.HbnSwpMTU}}}, bridge: {domain: {br_default: {access: {{ config.pod_vlan }}}}}}
+                        pf0vf3_if: {type: swp, link: {mtu: {{.spectro.var.HbnSwpMTU}}}, bridge: {domain: {br_default: {access: {{ config.pod_vlan }}}}}}
+
+                        # Anycast SVI = the pod tenant gateway. SAME IP on both DPUs
+                        # ({{ config.pod_svi_ip }}) so a pod's gateway is DPU- and vfID-
+                        # independent. Only needed for pods to reach OUTSIDE the tenant
+                        # /24 (pod-to-pod inside it is pure L2 over the L2VNI).
+                        vlan{{ config.pod_vlan }}:
+                          type: svi
+                          vlan: {{ config.pod_vlan }}
+                          ip:
+                            address:
+                              {{ config.pod_svi_ip }}: {}
+
+                      # VLAN {{ config.pod_vlan }} -> L2VNI {{ config.pod_l2vni }} (the stretched tenant segment).
+                      bridge:
+                        domain:
+                          br_default:
+                            vlan:
+                              "{{ config.pod_vlan }}":
+                                vni:
+                                  "{{ config.pod_l2vni }}": {}
+
+                      # VXLAN VTEP on the loopback; ARP/ND suppression so BUM stays local.
+                      nve:
+                        vxlan:
+                          enable: on
+                          arp-nd-suppress: on
+                          mac-learning: off
+                          source:
+                            address: {{ config.self_lo }}
+
+                      evpn:
+                        enable: on
+                        route-advertise: {}
+
+                      router:
+                        bgp:
+                          enable: on
+                          graceful-restart:
+                            mode: full
+
+                      vrf:
+                        default:
+                          router:
+                            bgp:
+                              address-family:
+                                ipv4-unicast:
+                                  enable: on
+                                  redistribute:
+                                    connected:
+                                      enable: on
+                                # EVPN address-family carries the L2VNI type-2/3 routes.
+                                l2vpn-evpn:
+                                  enable: on
+                              autonomous-system: {{ config.bgp_autonomous_system }}
+                              enable: on
+                              neighbor:
+                                # Numbered /31 eBGP to the leaf — IPv4 underlay only
+                                # (advertises the loopbacks). Leaf is NOT EVPN-capable
+                                # (l2vpn-evpn NoNeg), so do NOT enable EVPN AF here.
+                                {{ config.p0_peer_ip }}:
+                                  remote-as: {{ config.leaf_asn }}
+                                  type: numbered
+                                  address-family:
+                                    ipv4-unicast: {enable: on}
+                                {{ config.p1_peer_ip }}:
+                                  remote-as: {{ config.leaf_asn }}
+                                  type: numbered
+                                  address-family:
+                                    ipv4-unicast: {enable: on}
+                                # DIRECT DPU-to-DPU EVPN session (multihop, loopback-to-
+                                # loopback) — carries the L2VNI across DPUs; VXLAN rides
+                                # the IPv4 underlay through the (non-EVPN) leaf.
+                                {{ config.peer_lo }}:
+                                  remote-as: {{ config.peer_asn }}
+                                  type: numbered
+                                  update-source: lo
+                                  multihop-ttl: 5
+                                  address-family:
+                                    l2vpn-evpn: {enable: on}
+                              path-selection:
+                                multipath:
+                                  aspath-ignore: on
+                              router-id: {{ config.self_lo }}
+
+    dpuDeployments:
+      - name: ovn-hbn
+        dpus:
+          bfb: bf-bundle-v25.10.1
+          flavor: hbn-v25.10.1
+          nodeEffect:
+            noEffect: true
+          dpuSets:
+            - nameSuffix: "dpuset1"
+              nodeSelector:
+                matchLabels:
+                  feature.node.kubernetes.io/dpu-enabled: "true"
+                  dpu/use-case: "hbn"
+        services:
+          doca-hbn:
+            serviceTemplate: doca-hbn
+            serviceConfiguration: doca-hbn
+        serviceChains:
+          switches:
+            - ports:
+                - serviceInterface:
+                    matchLabels:
+                      uplink: p0
+                - service:
+                    name: doca-hbn
+                    interface: p0_if
+            - ports:
+                - serviceInterface:
+                    matchLabels:
+                      uplink: p1
+                - service:
+                    name: doca-hbn
+                    interface: p1_if
+            # v15 THE OFFLOAD LINK: connect the host PF0 representor (pf0hpf,
+            # a DPUServiceInterface of interfaceType: pf pfID 0) to HBN's
+            # pf0hpf_if swp. sfc-controller eSwitch-programs this so the host's
+            # enp14s0f0np0 dataplane is hardware-forwarded into HBN. This is the
+            # switch that v14 was missing (v14 wrongly raw-added pf0hpf to br-hbn
+            # via OVS instead, which HBN can't route).
+            - ports:
+                - serviceInterface:
+                    matchLabels:
+                      hostpf: pf0hpf
+                - service:
+                    name: doca-hbn
+                    interface: pf0hpf_if
+            # v15 POD-VF OFFLOAD switches: connect each host VF representor
+            # (pf0vf<N>, a vf-type DPUServiceInterface) to its HBN swp pf0vf<N>_if.
+            # sfc-controller eSwitch-programs pf0vf<N> -> pf0vf<N>_if so a pod's
+            # net1 (that VF) is hardware-forwarded into HBN. Same mechanism as the
+            # pf0hpf switch above, one per VF.
+            - ports:
+                - serviceInterface:
+                    matchLabels:
+                      hostvf: pf0vf0
+                - service:
+                    name: doca-hbn
+                    interface: pf0vf0_if
+            - ports:
+                - serviceInterface:
+                    matchLabels:
+                      hostvf: pf0vf1
+                - service:
+                    name: doca-hbn
+                    interface: pf0vf1_if
+            - ports:
+                - serviceInterface:
+                    matchLabels:
+                      hostvf: pf0vf2
+                - service:
+                    name: doca-hbn
+                    interface: pf0vf2_if
+            - ports:
+                - serviceInterface:
+                    matchLabels:
+                      hostvf: pf0vf3
+                - service:
+                    name: doca-hbn
+                    interface: pf0vf3_if
+
+    dpuServiceInterfaces:
+      - name: p0
+        template:
+          metadata:
+            labels:
+              uplink: "p0"
+          spec:
+            interfaceType: physical
+            physical:
+              interfaceName: p0
+      - name: p1
+        template:
+          metadata:
+            labels:
+              uplink: "p1"
+          spec:
+            interfaceType: physical
+            physical:
+              interfaceName: p1
+      # v15 THE OFFLOAD PRIMITIVE: the host PF0 representor on the DPU.
+      # interfaceType: pf + pfID 0 tells sfc-controller to bind the DPU's
+      # pf0hpf (host-facing PF0) into the ServiceChain. Matched by the
+      # ServiceChain switch above (hostpf: pf0hpf) -> doca-hbn pf0hpf_if.
+      # For POD-VF offload later, add analogous entries with
+      # interfaceType: vf, vf: {pfID: 0, vfID: N}.
+      - name: pf0hpf
+        template:
+          metadata:
+            labels:
+              hostpf: "pf0hpf"
+          spec:
+            interfaceType: pf
+            pf:
+              pfID: 0
+      # v15 POD-VF OFFLOAD primitives: the host PF0's SR-IOV VF representors on
+      # the DPU. interfaceType: vf + pfID 0 + vfID N (parentInterfaceRef p0) tells
+      # sfc-controller to bind pf0vf<N> into the ServiceChain (matched by hostvf:
+      # pf0vf<N> above) -> doca-hbn pf0vf<N>_if. Per NVIDIA/doca-platform ZT-HBN
+      # "Using VFs" use case. 4 VFs = 4 offloaded pod endpoints per DPU.
+      - name: pf0vf0
+        template:
+          metadata:
+            labels:
+              hostvf: "pf0vf0"
+          spec:
+            interfaceType: vf
+            vf:
+              parentInterfaceRef: p0
+              pfID: 0
+              vfID: 0
+      - name: pf0vf1
+        template:
+          metadata:
+            labels:
+              hostvf: "pf0vf1"
+          spec:
+            interfaceType: vf
+            vf:
+              parentInterfaceRef: p0
+              pfID: 0
+              vfID: 1
+      - name: pf0vf2
+        template:
+          metadata:
+            labels:
+              hostvf: "pf0vf2"
+          spec:
+            interfaceType: vf
+            vf:
+              parentInterfaceRef: p0
+              pfID: 0
+              vfID: 2
+      - name: pf0vf3
+        template:
+          metadata:
+            labels:
+              hostvf: "pf0vf3"
+          spec:
+            interfaceType: vf
+            vf:
+              parentInterfaceRef: p0
+              pfID: 0
+              vfID: 3
+      # Service-type ServiceInterface entries that the ServiceChain reconciler expects.
+      # Without these three, br-sfc never gets custom flows and doca-hbn BGP stays Active.
+      # Discovered 2026-07-16: sfc-controller looks up SI labeled interface:<name> +
+      # service:dpudeployment_ovn-hbn_doca-hbn; the pod-side interfaces (p0_if/p1_if/
+      # pf0hpf_if) come from mybrhbn multus attachments and must be represented as
+      # service-type SIs referencing DPUService doca-hbn.
+      #
+      # v15 FIX (serviceID must be the DEPLOYMENT-SCOPED name, not plain "doca-hbn"):
+      # when doca-hbn runs inside a DPUDeployment, DPF labels the HBN pod
+      # svc.dpu.nvidia.com/service=dpudeployment_ovn-hbn_doca-hbn. sfc-controller
+      # resolves each service-type ServiceInterface's backing pod by matching a pod
+      # whose svc.dpu.nvidia.com/service label EQUALS the SI's spec.service.serviceID.
+      # With serviceID: doca-hbn (plain) the lookup searched for a pod labeled
+      # "doca-hbn", found none ("no pod ... matching labels ... on node ... found"),
+      # and every per-node ServiceChain stuck at Pending -> pf0hpf_if never wired ->
+      # no offload. Setting serviceID to the prefixed form makes the lookup succeed
+      # and the ServiceChains reach Success. (The labels above were already prefixed;
+      # only serviceID was wrong.)
+      - name: doca-hbn-p0-if
+        template:
+          metadata:
+            labels:
+              svc.dpu.nvidia.com/interface: "p0_if"
+              svc.dpu.nvidia.com/service: dpudeployment_ovn-hbn_doca-hbn
+          spec:
+            interfaceType: service
+            service:
+              serviceID: dpudeployment_ovn-hbn_doca-hbn
+              interfaceName: p0_if
+              network: dpf-operator-system/mybrhbn
+      - name: doca-hbn-p1-if
+        template:
+          metadata:
+            labels:
+              svc.dpu.nvidia.com/interface: "p1_if"
+              svc.dpu.nvidia.com/service: dpudeployment_ovn-hbn_doca-hbn
+          spec:
+            interfaceType: service
+            service:
+              serviceID: dpudeployment_ovn-hbn_doca-hbn
+              interfaceName: p1_if
+              network: dpf-operator-system/mybrhbn
+      # v15: the HBN service-side interface for the host PF0 path. This is the
+      # DPU-pod-side SF (pf0hpf_if) that the ServiceChain patches to the pf0hpf
+      # representor. Replaces the old pf2dpu2_if (OVN path).
+      - name: doca-hbn-pf0hpf-if
+        template:
+          metadata:
+            labels:
+              svc.dpu.nvidia.com/interface: "pf0hpf_if"
+              svc.dpu.nvidia.com/service: dpudeployment_ovn-hbn_doca-hbn
+          spec:
+            interfaceType: service
+            service:
+              serviceID: dpudeployment_ovn-hbn_doca-hbn
+              interfaceName: pf0hpf_if
+              network: dpf-operator-system/mybrhbn
+      # v15 POD-VF: HBN service-side interfaces for the 4 pod-VF swps. Same as
+      # pf0hpf_if but one per VF; serviceID must be the deployment-scoped name so
+      # sfc-controller can resolve the HBN pod (see the serviceID note above).
+      - name: doca-hbn-pf0vf0-if
+        template:
+          metadata:
+            labels:
+              svc.dpu.nvidia.com/interface: "pf0vf0_if"
+              svc.dpu.nvidia.com/service: dpudeployment_ovn-hbn_doca-hbn
+          spec:
+            interfaceType: service
+            service:
+              serviceID: dpudeployment_ovn-hbn_doca-hbn
+              interfaceName: pf0vf0_if
+              network: dpf-operator-system/mybrhbn
+      - name: doca-hbn-pf0vf1-if
+        template:
+          metadata:
+            labels:
+              svc.dpu.nvidia.com/interface: "pf0vf1_if"
+              svc.dpu.nvidia.com/service: dpudeployment_ovn-hbn_doca-hbn
+          spec:
+            interfaceType: service
+            service:
+              serviceID: dpudeployment_ovn-hbn_doca-hbn
+              interfaceName: pf0vf1_if
+              network: dpf-operator-system/mybrhbn
+      - name: doca-hbn-pf0vf2-if
+        template:
+          metadata:
+            labels:
+              svc.dpu.nvidia.com/interface: "pf0vf2_if"
+              svc.dpu.nvidia.com/service: dpudeployment_ovn-hbn_doca-hbn
+          spec:
+            interfaceType: service
+            service:
+              serviceID: dpudeployment_ovn-hbn_doca-hbn
+              interfaceName: pf0vf2_if
+              network: dpf-operator-system/mybrhbn
+      - name: doca-hbn-pf0vf3-if
+        template:
+          metadata:
+            labels:
+              svc.dpu.nvidia.com/interface: "pf0vf3_if"
+              svc.dpu.nvidia.com/service: dpudeployment_ovn-hbn_doca-hbn
+          spec:
+            interfaceType: service
+            service:
+              serviceID: dpudeployment_ovn-hbn_doca-hbn
+              interfaceName: pf0vf3_if
+              network: dpf-operator-system/mybrhbn
+      # v12: `ovn` DPUServiceInterface removed with the OVN DPUService.
+
+    dpuServiceIPAMs:
+      - name: loopback
+        ipv4Network:
+          network: "{{.spectro.var.HbnLoopbackCIDR}}"
+          prefixSize: 32
+      # pool1 supplies IPs for pf0hpf_if (the host-PF0 offload swp) inside HBN.
+      # Gateway allocated from index 3 per /29 per DPU (host uses it as its GW).
+      - name: pool1
+        ipv4Network:
+          network: "{{.spectro.var.OvnPool1CIDR}}"
+          gatewayIndex: 3
+          prefixSize: 29
+      # v17 EVPN: the per-VF /29 pools (poolvf0-3) are REMOVED. The VF swps are now
+      # L2 bridge access ports (no L3 IP), so they need no nv-ipam allocation. Pod
+      # net1 IPs come from the flat tenant /24 on the host side (the hbn-fabric NAD),
+      # not from a DPU-side pool. pool1 stays for the host-PF path (pf0hpf_if).
+
+    dpuServices: []
+    # v12: dpuServiceCredentialRequest ovn-dpu removed with the OVN DPUService.
+    # (Its CA was set to the HOST cluster CA — a DPF v25.10.1 defect that broke
+    # doca-ovnkube-controller TLS to kubernetes.default.svc. See memory
+    # dpf-ovn-dpu-secret-ca-bug for the runtime workaround if we bring OVN back.)
+    dpuServiceCredentialRequests: []
+    dpuServiceChains: []

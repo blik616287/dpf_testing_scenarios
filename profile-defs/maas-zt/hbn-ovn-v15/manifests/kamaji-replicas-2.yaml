@@ -1,0 +1,69 @@
+# v13 fix #3: force TenantControlPlane.spec.controlPlane.deployment.replicas = 2.
+# DPF's kamaji-cm creates the TCP with 3 replicas by default. The CP VM is
+# CPU-oversubscribed (palette-controller-manager+dpf-provisioning eat the
+# budget) so the 3rd kamaji pod stays Pending. TCP's Deployment then reports
+# MinimumReplicasUnavailable, kamaji-cm silent-stalls on "missing NodePort for
+# kube-apiserver", DPUs are stuck in Initializing on
+# "DPUClusterNotAllocated: cluster ... phase: Creating", and the DPF DPU state
+# machine won't advance. Reducing to 2 unblocks the whole cascade.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kamaji-replicas-2
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kamaji-replicas-2
+rules:
+  - apiGroups: [kamaji.clastix.io]
+    resources: [tenantcontrolplanes]
+    verbs: [get, list, watch, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kamaji-replicas-2
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kamaji-replicas-2}
+subjects:
+  - kind: ServiceAccount
+    name: kamaji-replicas-2
+    namespace: kube-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kamaji-replicas-2
+  namespace: kube-system
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: kamaji-replicas-2
+          restartPolicy: Never
+          containers:
+          - name: patch
+            image: bitnami/kubectl:latest
+            command: ["/bin/sh","-c"]
+            args:
+              - |
+                set -eu
+                # Every TenantControlPlane owned by DPF gets patched.
+                for tcp in $(kubectl get tenantcontrolplane -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+                  ns="${tcp%/*}"; name="${tcp#*/}"
+                  cur=$(kubectl -n "$ns" get tenantcontrolplane "$name" -o jsonpath='{.spec.controlPlane.deployment.replicas}' 2>/dev/null)
+                  if [ "$cur" != "2" ]; then
+                    kubectl -n "$ns" patch tenantcontrolplane "$name" \
+                      --type=json \
+                      -p '[{"op":"replace","path":"/spec/controlPlane/deployment/replicas","value":2}]' \
+                      && echo "patched $ns/$name" || true
+                  fi
+                done
+            resources: {requests: {cpu: 5m, memory: 32Mi}}

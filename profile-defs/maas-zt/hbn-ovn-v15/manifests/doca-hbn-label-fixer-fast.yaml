@@ -1,0 +1,75 @@
+# v13 fix #7: fast doca-hbn label fixer (Deployment, not CronJob).
+# sfc-controller looks up pods by svc.dpu.nvidia.com/service=doca-hbn, but the
+# DPUService renders them with svc.dpu.nvidia.com/service=dpudeployment_ovn-hbn_doca-hbn.
+# The existing CronJob (v11-inherited) runs every 60 s — too slow, ServiceChain
+# stays Pending until the first tick. This Deployment tails the tenant API and
+# relabels within seconds of pod schedule.
+# Runs against the tenant Kamaji cluster via the admin-kubeconfig secret so it
+# has the right RBAC.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: doca-hbn-label-fixer-fast
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: doca-hbn-label-fixer-fast
+  namespace: dpu-cplane-tenant1
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: doca-hbn-label-fixer-fast
+  namespace: dpu-cplane-tenant1
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: doca-hbn-label-fixer-fast}
+subjects:
+  - kind: ServiceAccount
+    name: doca-hbn-label-fixer-fast
+    namespace: dpf-operator-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doca-hbn-label-fixer-fast
+  namespace: dpf-operator-system
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: doca-hbn-label-fixer-fast}}
+  template:
+    metadata: {labels: {app: doca-hbn-label-fixer-fast}}
+    spec:
+      serviceAccountName: doca-hbn-label-fixer-fast
+      containers:
+      - name: fixer
+        image: bitnami/kubectl:latest
+        command: ["/bin/sh","-c"]
+        args:
+          - |
+            set -eu
+            # Grab a raw tenant admin kubeconfig and relabel forever.
+            KC=/tmp/tenant.kc
+            while true; do
+              kubectl -n dpu-cplane-tenant1 get secret dpu-cplane-tenant1-admin-kubeconfig \
+                -o jsonpath='{.data.admin\.svc}' 2>/dev/null | base64 -d > "$KC" || true
+              # Kamaji's admin kubeconfig points at the in-cluster Service DNS, which
+              # doesn't resolve from this pod's dnsPolicy; swap for the VIP.
+              if [ -s "$KC" ]; then
+                PORT=$(kubectl -n dpu-cplane-tenant1 get svc dpu-cplane-tenant1 -o jsonpath="{.spec.ports[0].nodePort}" 2>/dev/null); [ -n "$PORT" ] && sed -i "s|server: https://.*|server: https://172.16.30.240:${PORT}|" "$KC" || true
+                # Any doca-hbn pod that still has the DPF-verbose label gets relabelled.
+                for p in $(KUBECONFIG=$KC kubectl -n dpf-operator-system get po \
+                            -l svc.dpu.nvidia.com/service=dpudeployment_ovn-hbn_doca-hbn \
+                            -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+                  KUBECONFIG=$KC kubectl -n dpf-operator-system label pod "$p" \
+                    svc.dpu.nvidia.com/service=doca-hbn --overwrite \
+                    >/dev/null 2>&1 && echo "relabelled $p" || true
+                done
+              fi
+              sleep 5
+            done
+        resources: {requests: {cpu: 5m, memory: 32Mi}, limits: {cpu: 50m, memory: 64Mi}}

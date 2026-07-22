@@ -1,0 +1,123 @@
+---
+# Companion to tenant-bootstrap-token-generator (which creates fresh 24h tokens every 30 min).
+#
+# Problem: DPF v25.10.1 embeds a specific bootstrap-token into each DPU's bf.cfg at
+# BFB-flash time. Kubeadm on the DPU uses THAT token to fetch cluster-info + do TLS
+# bootstrap. If the DPU boot takes long enough that the embedded token expires
+# (default TTL is 2h in some DPF releases), the DPU can never join.
+#
+# This CronJob patches every bootstrap-token in the tenant cluster's kube-system to
+# extend its expiration to now + 168h (7 days) as long as it still has any TTL left.
+# That way any token DPF baked in stays valid across long DPU cold-boot windows.
+#
+# Runs every 15 min; touches only tokens that still have TTL (never resurrects
+# expired ones — those are cleaned up by tokencleaner regardless).
+#
+# The tenant kubeconfig is read from the host-cluster Secret DPF creates
+# (dpu-cplane-tenant1-admin-kubeconfig).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpf-bootstrap-token-keeper
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dpf-bootstrap-token-keeper-tenant-kubeconfig
+  namespace: dpu-cplane-tenant1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dpf-bootstrap-token-keeper-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: dpf-bootstrap-token-keeper
+    namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dpf-bootstrap-token-keeper-secret-reader
+  namespace: dpu-cplane-tenant1
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["dpu-cplane-tenant1-admin-kubeconfig"]
+    verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpf-bootstrap-token-keeper
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpf-bootstrap-token-keeper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpf-bootstrap-token-keeper
+subjects:
+  - kind: ServiceAccount
+    name: dpf-bootstrap-token-keeper
+    namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpf-bootstrap-token-keeper
+  namespace: dpf-operator-system
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 900
+      template:
+        spec:
+          serviceAccountName: dpf-bootstrap-token-keeper
+          restartPolicy: OnFailure
+          containers:
+            - name: keeper
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  echo "[$(date -u +%FT%TZ)] dpf-bootstrap-token-keeper run"
+
+                  kubectl -n dpu-cplane-tenant1 get secret dpu-cplane-tenant1-admin-kubeconfig \
+                    -o jsonpath='{.data.admin\.conf}' | base64 -d > /tmp/tenant.kubeconfig
+                  export KUBECONFIG=/tmp/tenant.kubeconfig
+
+                  # Target expiration: now + 168h (7 days)
+                  TARGET_EXP=$(date -u -d '+168 hours' +%Y-%m-%dT%H:%M:%SZ)
+                  # Threshold for touching: extend anything that has < 24h left
+                  THRESHOLD=$(date -u -d '+24 hours' +%s)
+
+                  for s in $(kubectl -n kube-system get secret -o name 2>/dev/null \
+                             | grep '^secret/bootstrap-token-' || true); do
+                    exp=$(kubectl -n kube-system get "$s" \
+                          -o jsonpath='{.data.expiration}' 2>/dev/null | base64 -d || echo "")
+                    [ -z "$exp" ] && continue
+                    exp_epoch=$(date -u -d "$exp" +%s 2>/dev/null || echo 0)
+                    now=$(date -u +%s)
+                    [ "$exp_epoch" -lt "$now" ] && { echo "  $s already expired — leave alone"; continue; }
+                    [ "$exp_epoch" -gt "$THRESHOLD" ] && { echo "  $s exp=$exp still >24h out — skip"; continue; }
+                    new_b64=$(printf '%s' "$TARGET_EXP" | base64 -w0)
+                    kubectl -n kube-system patch "$s" --type=json \
+                      -p "[{\"op\":\"replace\",\"path\":\"/data/expiration\",\"value\":\"$new_b64\"}]" \
+                      >/dev/null
+                    echo "  $s exp $exp → $TARGET_EXP"
+                  done
+                  echo "[$(date -u +%FT%TZ)] done"

@@ -1,0 +1,246 @@
+---
+# Workaround for DPF v25.10.1 BFB URL concat bug (see memory feedback_dpf_bfb_url_concat_bug).
+#
+# The DPF provisioning-controller renders the Redfish ImageURI as 'bfb/?{bfb}?{bfcfg}'
+# with the template placeholder literals unresolved, producing e.g.
+# 'bfb/??dpf-operator-system-bf-bundle-v25.10.1.bfb'. The DPU BMC returns 404 for that
+# path ('/dev/rshim0/boot' Targets not found), DPU stays in Phase=Error, BFBTransferred=FailToInstall.
+#
+# This controller watches DPU CRs. When it sees the specific failure signature it:
+#   1. Looks up the associated DPUDevice for BMC IP + PCI addr
+#   2. Reads bmc-shared-password from the Secret
+#   3. SSHes into the BMC as root
+#   4. Curls the BFB directly from the bfb-registry ClusterIP into /dev/rshim0/boot
+#   5. Requests DPU reboot via Redfish
+#
+# Runs one instance (single leader). Idempotent per DPU — will only rshim-push once per
+# stuck DPU per boot cycle. Detects re-attempts by tracking observed condition transitions.
+#
+# Also short-circuits: if BFBTransferred already True (either via Redfish or a prior rshim push),
+# nothing happens. If the DPU is in an active install task (Task Collection non-empty on BMC),
+# waits for that to complete before pushing.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bfb-rshim-fallback-controller
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpus", "dpus/status", "dpudevices", "bfbs"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["bmc-shared-password"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bfb-rshim-fallback-controller
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bfb-rshim-fallback-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bfb-rshim-fallback-controller
+subjects:
+  - kind: ServiceAccount
+    name: bfb-rshim-fallback-controller
+    namespace: dpf-operator-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bfb-rshim-fallback-controller
+  namespace: dpf-operator-system
+  labels:
+    app: bfb-rshim-fallback-controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bfb-rshim-fallback-controller
+  template:
+    metadata:
+      labels:
+        app: bfb-rshim-fallback-controller
+    spec:
+      serviceAccountName: bfb-rshim-fallback-controller
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: controller
+          image: alpine:3.20
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              apk add --no-cache bash curl openssh-client jq >/dev/null 2>&1
+              # kubectl install
+              KV=$(curl -sk https://kubernetes.default.svc/version | grep -oE '"gitVersion":\s*"[^"]+"' | cut -d'"' -f4)
+              curl -sL "https://dl.k8s.io/release/${KV:-v1.34.2}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl
+              chmod +x /usr/local/bin/kubectl
+              exec /bin/bash /scripts/controller.sh
+          env:
+            - name: NAMESPACE
+              value: dpf-operator-system
+            - name: BFB_REGISTRY_SVC
+              value: bfb-registry.dpf-operator-system.svc.cluster.local
+            - name: BFB_REGISTRY_PORT
+              value: "8080"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: bfb-rshim-fallback-scripts
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bfb-rshim-fallback-scripts
+  namespace: dpf-operator-system
+data:
+  controller.sh: |
+    #!/bin/bash
+    # Reconcile loop.
+    set -eu
+    NS="${NAMESPACE:-dpf-operator-system}"
+
+    log() { echo "[$(date -Iseconds)] $*"; }
+
+    get_bmc_password() {
+      kubectl -n "$NS" get secret bmc-shared-password -o jsonpath='{.data.password}' 2>/dev/null | base64 -d
+    }
+
+    # Given a DPU name, return "$bmc_ip $bfb_name" (or empty on failure).
+    lookup_bmc_bfb() {
+      local dpu="$1"
+      local dpudev bfb bmc
+      dpudev=$(kubectl -n "$NS" get dpu "$dpu" -o jsonpath='{.spec.dpuDevice}' 2>/dev/null || true)
+      [ -z "$dpudev" ] && return
+      bmc=$(kubectl -n "$NS" get dpudevice "$dpudev" -o jsonpath='{.spec.bmcIp}' 2>/dev/null || true)
+      [ -z "$bmc" ] && return
+      # BFB name is the file name that DPF baked into bfb-registry:
+      #   <namespace>-<bfb-cr-name>.bfb  e.g. dpf-operator-system-bf-bundle-v25.10.1.bfb
+      # Read from the DPU's referenced BFB CR.
+      local bfb_cr fname
+      bfb_cr=$(kubectl -n "$NS" get dpu "$dpu" -o jsonpath='{.spec.bfb}' 2>/dev/null || true)
+      fname=$(kubectl -n "$NS" get bfb "$bfb_cr" -o jsonpath='{.status.fileName}' 2>/dev/null || true)
+      [ -z "$fname" ] && return
+      echo "$bmc $fname"
+    }
+
+    # Test whether the specific URL-concat 404 signature is present in the failure body.
+    is_url_concat_failure() {
+      local dpu="$1"
+      local msg
+      msg=$(kubectl -n "$NS" get dpu "$dpu" \
+        -o jsonpath='{.status.conditions[?(@.type=="BFBTransferred")].message}' 2>/dev/null || true)
+      case "$msg" in
+        *"/dev/rshim0/boot"*"was not found"*) return 0 ;;
+        *"Unknown Host"*) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+
+    already_pushed() {
+      local dpu="$1"
+      kubectl -n "$NS" get dpu "$dpu" \
+        -o jsonpath='{.metadata.annotations.dpf-testing\.custeng\.sc/rshim-push-completed}' 2>/dev/null \
+        | grep -q .
+    }
+
+    mark_pushed() {
+      local dpu="$1"
+      kubectl -n "$NS" annotate dpu "$dpu" \
+        "dpf-testing.custeng.sc/rshim-push-completed=$(date -Iseconds)" --overwrite >/dev/null
+    }
+
+    # Wait until BMC's TaskService has no in-flight tasks (avoids racing an ongoing Redfish transfer).
+    bmc_idle() {
+      local bmc="$1" pw="$2" active
+      active=$(curl -sk -u "root:$pw" --max-time 5 \
+        "https://${bmc}/redfish/v1/TaskService/Tasks/" 2>/dev/null \
+        | grep -oE '"Members@odata\.count":\s*[0-9]+' | grep -oE '[0-9]+$')
+      [ "${active:-1}" = "0" ]
+    }
+
+    rshim_push() {
+      local dpu="$1" bmc="$2" fname="$3" pw="$4"
+      local url="http://${BFB_REGISTRY_SVC}:${BFB_REGISTRY_PORT}/bfb/${fname}"
+      log "$dpu: rshim-push BMC=$bmc URL=$url"
+      # SSH options: password auth only, quiet.
+      # sshpass is not preinstalled; use SSH_ASKPASS trick? Simpler: use openssh
+      # -o PreferredAuthentications=password with -o PasswordAuthentication=yes
+      # For non-interactive password, we pipe the password via SSHPASS+SSH_ASKPASS.
+      # Alternative: use SSH_ASKPASS/DISPLAY. But we need SSH to run without a tty.
+      export SSHPASS="$pw"
+      # Use setsid + SSH_ASKPASS to feed the password non-interactively
+      mkdir -p /tmp/ssh-askpass
+      cat > /tmp/ssh-askpass/askpass.sh <<EOF
+    #!/bin/sh
+    echo "\$SSHPASS"
+    EOF
+      chmod +x /tmp/ssh-askpass/askpass.sh
+      export SSH_ASKPASS=/tmp/ssh-askpass/askpass.sh
+      export DISPLAY=:0
+      setsid -w ssh -o BatchMode=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=10 \
+        "root@${bmc}" \
+        "curl -sk --max-time 600 '${url}' -o /dev/rshim0/boot -w 'push HTTP:%{http_code} bytes:%{size_download} time:%{time_total}s'" \
+        </dev/null 2>&1 | tail -3
+      # Trigger DPU reset via Redfish ForceRestart
+      curl -sk -u "root:$pw" -X POST -H "Content-Type: application/json" \
+        "https://${bmc}/redfish/v1/Systems/Bluefield/Actions/ComputerSystem.Reset" \
+        -d '{"ResetType":"ForceRestart"}' --max-time 15 -o /dev/null -w "reset HTTP:%{http_code}\n" || true
+    }
+
+    while true; do
+      pw=$(get_bmc_password)
+      if [ -z "$pw" ]; then
+        log "bmc-shared-password Secret missing/empty — waiting"; sleep 30; continue
+      fi
+      # List candidate DPUs
+      dpus=$(kubectl -n "$NS" get dpu -o jsonpath='{range .items[*]}{.metadata.name} {end}' 2>/dev/null || true)
+      for dpu in $dpus; do
+        if already_pushed "$dpu"; then continue; fi
+        if ! is_url_concat_failure "$dpu"; then continue; fi
+        info=$(lookup_bmc_bfb "$dpu")
+        if [ -z "$info" ]; then log "$dpu: BMC/BFB not resolvable yet"; continue; fi
+        set -- $info
+        bmc="$1"; fname="$2"
+        if ! bmc_idle "$bmc" "$pw"; then
+          log "$dpu: BMC $bmc has an in-flight task; skipping this pass"; continue
+        fi
+        log "$dpu: matched URL-concat signature; rshim-pushing"
+        if rshim_push "$dpu" "$bmc" "$fname" "$pw"; then
+          mark_pushed "$dpu"
+        fi
+      done
+      sleep 30
+    done

@@ -1,0 +1,53 @@
+# v13 fix #4: put the Kamaji VIP on the OVN-K br-ex interface (host cluster).
+# DPUCluster's keepalived listens on the physical uplink (e.g. ens18/ens1f0/
+# enp0s3), but OVN-K wraps that as a slave of br-ex (brens*). ARP for the VIP
+# then answers off the wrong interface and the DPUs' kube-proxy → NodePort
+# route to Kamaji hangs. Adding the VIP as a /32 kernel IP on br-ex forces the
+# host to answer ARP for it directly and makes kube-proxy's PREROUTING DNAT
+# work — same DPU→Kamaji fix from
+# feedback_ovnk_nodeport_bridge_fix / mtu9000_hbn_accel_achieved.
+# Runs on CP nodes only (nodeSelector), auto-detects the OVN-K br-ex.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kamaji-vip-on-brex
+  namespace: kube-system
+spec:
+  selector: {matchLabels: {app: kamaji-vip-on-brex}}
+  template:
+    metadata:
+      labels: {app: kamaji-vip-on-brex}
+      annotations:
+        pod-security.kubernetes.io/enforce: privileged
+    spec:
+      priorityClassName: system-node-critical
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations: [{operator: Exists}]
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: vip-fixer
+        image: busybox:1.36
+        env:
+          - name: VIP
+            # Matches the profile default; if a deployment sets a different
+            # controlPlaneVIP variable the operator can `kubectl set env` it.
+            value: "172.16.30.240"
+        command: ["sh","-c"]
+        args:
+          - |
+            set -eu
+            # busybox has ip built-in; no apk needed
+            while true; do
+              # Auto-detect the OVN-K br-ex: the interface whose name starts
+              # with "br" and owns the node's primary route (172.16.30.0/24).
+              BR=$(ip -o -4 addr show scope global | \
+                    awk '/^[0-9]+: br/ {split($2,a,"@"); print a[1]}' | head -1)
+              if [ -n "${BR:-}" ]; then
+                ip addr add "$VIP/32" dev "$BR" 2>/dev/null || true
+              fi
+              sleep 30
+            done
+        securityContext: {privileged: true}
+        resources: {requests: {cpu: 5m, memory: 64Mi}, limits: {cpu: 50m, memory: 64Mi}}

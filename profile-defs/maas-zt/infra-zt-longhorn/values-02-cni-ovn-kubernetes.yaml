@@ -1,0 +1,96 @@
+# cni-ovn-kubernetes 1.0.0 override block for DPF Zero Trust + HBN.
+#
+# CORRECTED 2026-07-16: earlier version enabled DPU-mode charts and disabled
+# ovnkube-node/ovs-node, which meant the CP node had NO CNI DaemonSet targeted
+# at it → node stayed NotReady → Palette agent couldn't schedule → deadlock.
+#
+# The DPU-side chart (ovnkube-node-dpu) belongs in a DPUService inside the HBN
+# payload profile, NOT here. Here we deploy a standard cluster CNI on all nodes.
+# The workers (gpu-sm01/gpu-sm02) get labeled as DPU hosts LATER, at which point
+# an operator can flip their pods to the ovnkube-node-dpu-host variant.
+#
+# MTU (v6 CORRECTION): 1400, NOT 8940.
+# This is the CLUSTER pod-overlay MTU (pod eth0, OVN-K Geneve) which rides the
+# host MANAGEMENT uplink (brens18/ens1f0) — a 1G link at MTU 1500. Geneve adds
+# ~58 B, so the pod overlay must be <=~1400 to fit inside 1500; at 8940 OVN-K
+# refuses to start ("MTU of interface brens18 is too small for overlay MTU").
+# The old 8940 assumed an MTU-9000 mgmt fabric, which this deployment does NOT
+# have. This value has NOTHING to do with the acceleration path: HBN offload
+# (host PF / pod VF -> pf0hpf_if/p0_if/p1_if -> 40G p0/p1 uplinks) runs at
+# MTU 9000/9216 (payload profile HbnSwpMTU=9000, OVS mtu_request=9216) — a
+# separate dataplane. The ~37 Gbit/s jumbo path is unaffected by this 1400.
+# Hardcoded (not {{.spectro.var.PodMTU}}) so OVN-K comes up healthy on first
+# boot regardless of the payload profile's PodMTU var (which was wrongly 8940).
+pack:
+  namespace: ovn-kubernetes
+  namespaceLabels:
+    "ovn-kubernetes": "pod-security.kubernetes.io/enforce=privileged,pod-security.kubernetes.io/enforce-version=latest"
+
+charts:
+  ovn-kubernetes:
+    tags:
+      # In interconnect mode (enableInterconnect: true), the LOCAL nbdb/sbdb is
+      # supplied by `ovnkube-single-node-zone`, not by a shared `ovnkube-db` chart.
+      # `ovnkube-node` alone waits forever for an `ovnkube-db` k8s Endpoints entry
+      # that never gets created — pod stalls at "Waiting for ready_to_start_node".
+      # `ovnkube-single-node-zone` includes ovnkube-node + local ovn-nb/sb-ovsdb
+      # containers in one DaemonSet, plus a per-node Endpoints for the ovnkube-db
+      # service so the readiness check passes.
+      ovnkube-single-node-zone: true
+      ovs-node: true
+      ovnkube-control-plane: true
+
+      # NOT `ovnkube-node` on its own — that assumes a separate shared ovnkube-db.
+      ovnkube-node: false
+      # DPU variants deploy via the HBN+OVN payload as a DPUService, not here.
+      ovnkube-node-dpu: false
+      ovnkube-node-dpu-host: false
+      ovnkube-zone-controller: false
+
+    k8sAPIServer: auto
+    podNetwork: "{{.spectro.var.K8sPodCIDR}}/24"
+    serviceNetwork: "{{.spectro.var.K8sServiceCIDR}}"
+    # v17 FIX (EVIDENCE, ovnk-cp-bootstrap-deadlock): hardcode 1400, do NOT use
+    # PodMTU. The OVN-K overlay (Geneve) rides the node mgmt bridge (brens*/1G,
+    # MTU 1500) on this hardware — a PodMTU of 8940 makes ovnkube-node crashloop
+    # "MTU (1500) of brensXX too small for overlay MTU (8998)", stalling the whole
+    # CP at ControlPlaneNodeAdditionDone for 1h+. Pod eth0 MTU must be <= 1500-58
+    # (Geneve) = 1442. The offloaded VF (net1) is separately MTU 9000 and is NOT
+    # affected by this — it does not ride the OVN-K overlay.
+    mtu: "1400"
+
+    global:
+      nodeMgmtPortNetdev: ""
+      extGatewayNetworkInterface: ""
+      gatewayMode: shared
+      gatewayOpts: ""
+
+      v4JoinSubnet: "100.64.0.0/16"
+      v4MasqueradeSubnet: "169.254.0.0/17"
+      v4TransitSwitchSubnet: "100.88.0.0/16"
+
+      enableInterconnect: true
+
+      # Turn OFF features that require third-party CRDs the chart doesn't install:
+      #   * enableMultiNetwork    → multi-networkpolicies.k8s.cni.cncf.io (Multus NP)
+      #   * enablePersistentIPs   → ipamclaims.k8s.cni.cncf.io
+      # These are useful for host workloads but not required for the HBN+OVN DPU
+      # dataplane path we're benchmarking. With them ON the controller crashes with
+      # "failed to sync cache for *v1beta1.MultiNetworkPolicy informer".
+      enableMultiNetwork: false
+      enablePersistentIPs: false
+
+      enableEgressIp: true
+      enableEgressService: true
+      enableEgressFirewall: true
+      enableEgressQos: true
+      enableSvcTemplate: true
+
+      # IMAGE PIN — required. The Palette OVN-K pack default is `tag: master`
+      # which was retagged/removed on ghcr.io and now hard-fails to pull.
+      # v25.04 is the last-known-good stable tag. This key path is
+      # `charts.ovn-kubernetes.global.image` per the pack's helm values —
+      # earlier attempts at `charts.ovn-kubernetes.image` silently no-op'd.
+      image:
+        repository: ghcr.io/ovn-kubernetes/ovn-kubernetes/ovn-kube-ubuntu
+        tag: release-1.0

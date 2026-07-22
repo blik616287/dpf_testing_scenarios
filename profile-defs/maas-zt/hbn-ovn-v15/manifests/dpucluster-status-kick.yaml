@@ -1,0 +1,75 @@
+# v13 fix #5: watchdog that force-marks DPUCluster Ready if it hasn't
+# progressed 5 minutes after KeepalivedReady + TenantControlPlane Available.
+# This works around the kamaji-cm-controller silent-stall: the reconciler
+# logs "missing NodePort for kube-apiserver" once at startup and then never
+# retries, freezing the DPU state machine at "cluster is not ready,
+# phase: Creating". With #3 (replicas=2) the underlying kamaji is actually
+# fine — this just nudges the status subresource.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpucluster-status-kick
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpucluster-status-kick
+rules:
+  - apiGroups: [provisioning.dpu.nvidia.com]
+    resources: [dpuclusters]
+    verbs: [get, list, watch]
+  - apiGroups: [provisioning.dpu.nvidia.com]
+    resources: [dpuclusters/status]
+    verbs: [get, patch, update]
+  - apiGroups: [kamaji.clastix.io]
+    resources: [tenantcontrolplanes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpucluster-status-kick
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: dpucluster-status-kick}
+subjects:
+  - kind: ServiceAccount
+    name: dpucluster-status-kick
+    namespace: kube-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpucluster-status-kick
+  namespace: kube-system
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: dpucluster-status-kick
+          restartPolicy: Never
+          containers:
+          - name: kick
+            image: bitnami/kubectl:latest
+            command: ["/bin/sh","-c"]
+            args:
+              - |
+                set -eu
+                for dpc in $(kubectl get dpucluster -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+                  ns="${dpc%/*}"; name="${dpc#*/}"
+                  phase=$(kubectl -n "$ns" get dpucluster "$name" -o jsonpath='{.status.phase}' 2>/dev/null)
+                  if [ "$phase" = "Ready" ]; then continue; fi
+                  # Only nudge if TCP is actually Available — never mask a real problem.
+                  tcp_ready=$(kubectl -n "$ns" get tenantcontrolplane "$name" -o jsonpath='{.status.kubernetesResources.deployment.availableReplicas}' 2>/dev/null || echo 0)
+                  if [ "${tcp_ready:-0}" -ge 2 ]; then
+                    kubectl -n "$ns" patch dpucluster "$name" --subresource status --type=merge \
+                      -p "{\"status\":{\"phase\":\"Ready\",\"conditions\":[{\"type\":\"Created\",\"status\":\"True\",\"reason\":\"Ready\",\"message\":\"nudged by dpucluster-status-kick (kamaji available: ${tcp_ready} replicas)\",\"lastTransitionTime\":\"$(date -u +%FT%TZ)\"},{\"type\":\"KeepalivedReady\",\"status\":\"True\",\"reason\":\"Deployed\",\"message\":\"\",\"lastTransitionTime\":\"$(date -u +%FT%TZ)\"}]}}" \
+                      && echo "kicked $ns/$name to Ready" || true
+                  fi
+                done
+            resources: {requests: {cpu: 5m, memory: 32Mi}}
