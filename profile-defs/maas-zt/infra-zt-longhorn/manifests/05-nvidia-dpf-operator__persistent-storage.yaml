@@ -1,0 +1,20 @@
+---
+# BFB registry PVC — Longhorn RWX (share-manager via NFS-Ganesha).
+# Replaces the upstream NFS PV+PVC pair. Longhorn 1.10 dynamically provisions
+# a ReadWriteMany volume backed by share-manager pods; no external NFS server needed.
+#
+# The DPF operator (`bfbPVCName: bfb-pvc`) mounts this on the provisioning
+# controller AND on every dms/dpu-provisioner pod that needs to read the BFB
+# during Redfish push.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bfb-pvc
+  namespace: dpf-operator-system
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: "{{.spectro.var.BfbPvcSize}}"
