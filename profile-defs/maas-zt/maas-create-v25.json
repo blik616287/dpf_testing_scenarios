@@ -1,13 +1,13 @@
 {
   "metadata": {
-    "name": "dpf-hbn-ovn-v24",
+    "name": "dpf-hbn-ovn-v25",
     "labels": {}
   },
   "spec": {
     "cloudAccountUid": "68701eb20a6295d37a7d87df",
     "profiles": [
       {
-        "uid": "6a604e1f78c74466e537c5b4"
+        "uid": "6a6060c778c74604b4e2d200"
       },
       {
         "uid": "6a60121078c73f29a481a1f3"
