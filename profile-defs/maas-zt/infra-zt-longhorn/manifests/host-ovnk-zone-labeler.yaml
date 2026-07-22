@@ -1,0 +1,59 @@
+# v13 fix #1: aggressive k8s.ovn.org/zone-name labeler on HOST cluster nodes.
+# Palette-installed OVN-K comes up without this label; ovnkube-controller
+# crashes until the node has it. CronJob is too slow (min 1 min) and misses the
+# first-boot race. DaemonSet self-labels the node it runs on, and keeps
+# re-labelling every 15 s so a Palette-agent revert can't stick.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: host-ovnk-zone-labeler
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: host-ovnk-zone-labeler
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: host-ovnk-zone-labeler
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: host-ovnk-zone-labeler}
+subjects:
+  - kind: ServiceAccount
+    name: host-ovnk-zone-labeler
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: host-ovnk-zone-labeler
+  namespace: kube-system
+spec:
+  selector: {matchLabels: {app: host-ovnk-zone-labeler}}
+  template:
+    metadata: {labels: {app: host-ovnk-zone-labeler}}
+    spec:
+      serviceAccountName: host-ovnk-zone-labeler
+      priorityClassName: system-node-critical
+      hostNetwork: true
+      tolerations: [{operator: Exists}]
+      containers:
+      - name: labeler
+        image: bitnami/kubectl:latest
+        env:
+          - name: NODE_NAME
+            valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        command: ["/bin/sh","-c"]
+        args:
+          - |
+            set -eu
+            while true; do
+              kubectl label node "$NODE_NAME" "k8s.ovn.org/zone-name=$NODE_NAME" --overwrite >/dev/null 2>&1 || true
+              sleep 15
+            done
+        resources: {requests: {cpu: 5m, memory: 32Mi}, limits: {cpu: 50m, memory: 64Mi}}
