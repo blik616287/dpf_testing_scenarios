@@ -19,7 +19,7 @@ metadata:
   namespace: dpu-cplane-tenant1
 rules:
   - apiGroups: [""]
-    resources: [secrets]
+    resources: [secrets, services]
     verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -45,6 +45,8 @@ spec:
     metadata: {labels: {app: doca-hbn-label-fixer-fast}}
     spec:
       serviceAccountName: doca-hbn-label-fixer-fast
+      securityContext:
+        runAsUser: 0
       containers:
       - name: fixer
         image: bitnami/kubectl:latest
@@ -60,7 +62,7 @@ spec:
               # Kamaji's admin kubeconfig points at the in-cluster Service DNS, which
               # doesn't resolve from this pod's dnsPolicy; swap for the VIP.
               if [ -s "$KC" ]; then
-                PORT=$(kubectl -n dpu-cplane-tenant1 get svc dpu-cplane-tenant1 -o jsonpath="{.spec.ports[0].nodePort}" 2>/dev/null); [ -n "$PORT" ] && sed -i "s|server: https://.*|server: https://172.16.30.240:${PORT}|" "$KC" || true
+                PORT=$(kubectl -n dpu-cplane-tenant1 get svc dpu-cplane-tenant1 -o jsonpath="{.spec.ports[0].nodePort}" 2>/dev/null || true); [ -n "$PORT" ] && sed -i "s|server: https://.*|server: https://172.16.30.240:${PORT}|" "$KC" || true
                 # Any doca-hbn pod that still has the DPF-verbose label gets relabelled.
                 for p in $(KUBECONFIG=$KC kubectl -n dpf-operator-system get po \
                             -l svc.dpu.nvidia.com/service=dpudeployment_ovn-hbn_doca-hbn \
@@ -72,4 +74,4 @@ spec:
               fi
               sleep 5
             done
-        resources: {requests: {cpu: 5m, memory: 32Mi}, limits: {cpu: 50m, memory: 64Mi}}
+        resources: {requests: {cpu: 5m, memory: 32Mi}, limits: {cpu: 100m, memory: 256Mi}}
