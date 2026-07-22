@@ -59,10 +59,10 @@ spec:
                 for tcp in $(kubectl get tenantcontrolplane -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null); do
                   ns="${tcp%/*}"; name="${tcp#*/}"
                   cur=$(kubectl -n "$ns" get tenantcontrolplane "$name" -o jsonpath='{.spec.controlPlane.deployment.replicas}' 2>/dev/null)
-                  if [ "$cur" != "2" ]; then
+                  if [ "$cur" != "1" ]; then
                     kubectl -n "$ns" patch tenantcontrolplane "$name" \
                       --type=json \
-                      -p '[{"op":"replace","path":"/spec/controlPlane/deployment/replicas","value":2}]' \
+                      -p '[{"op":"replace","path":"/spec/controlPlane/deployment/replicas","value":1}]' \
                       && echo "patched $ns/$name" || true
                   fi
                 done

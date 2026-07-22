@@ -1,0 +1,93 @@
+# Durable fix for the DPU-join blocker caused by the Palette OVN-K gateway defect.
+#
+# ROOT CAUSE: the per-DPU DMS pods (gpu-smNN-dms) are hostNetwork with
+# dnsPolicy=ClusterFirstWithHostNet, so they resolve via CoreDNS (10.96.0.10).
+# But on this Palette OVN-K build, hostNetwork pods on the WORKER nodes cannot
+# reach ClusterIP services (the OVN gateway masquerade path is broken) -> the
+# DMS times out resolving the host cluster's API endpoint
+# (dpf-...-<id>.maas-custeng.sc) -> it can never register the DPUDevice ->
+# both DPUs sit at "DPU Cluster Config" forever and never join.
+#
+# The HOST itself CAN resolve that endpoint (via the MaaS upstream DNS in the
+# host resolv.conf) -- only the CoreDNS path from the pod netns is dead. So this
+# DaemonSet resolves the API endpoint the way the host does and injects the
+# mapping straight into each DMS container's /etc/hosts (via nsenter), which
+# short-circuits the broken CoreDNS lookup. Re-runs every 20s so freshly-created
+# DMS pods (each DPU re-provision spawns a new one) get fixed automatically.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dms-api-hosts-fixer
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dms-api-hosts-fixer
+rules:
+  - apiGroups: [""]
+    resources: [endpoints, nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dms-api-hosts-fixer
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: dms-api-hosts-fixer}
+subjects:
+  - kind: ServiceAccount
+    name: dms-api-hosts-fixer
+    namespace: dpf-operator-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dms-api-hosts-fixer
+  namespace: dpf-operator-system
+spec:
+  selector: {matchLabels: {app: dms-api-hosts-fixer}}
+  template:
+    metadata: {labels: {app: dms-api-hosts-fixer}}
+    spec:
+      serviceAccountName: dms-api-hosts-fixer
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: Default          # use the HOST resolv.conf (MaaS upstream), which CAN resolve the API endpoint
+      priorityClassName: system-node-critical
+      tolerations: [{operator: Exists}]
+      containers:
+      - name: fixer
+        image: bitnami/kubectl:latest
+        securityContext:
+          privileged: true
+          runAsUser: 0
+        command: ["/bin/sh","-c"]
+        args:
+          - |
+            set +e
+            while true; do
+              # API endpoint hostname the DMS uses = the worker kubelet's server.
+              URL=$(grep -h 'server:' /host/etc/kubernetes/kubelet.conf 2>/dev/null | awk '{print $2}' | head -1)
+              HOST=$(echo "$URL" | sed 's|https\?://||; s|:.*||')
+              # CP apiserver IP from the kubernetes Endpoints (kubectl uses the in-cluster
+              # 10.96.0.1, which IS reachable from hostNetwork -- the apiserver is host-network
+              # backed, unlike CoreDNS whose ClusterIP is dead through the OVN gateway defect).
+              IP=$(kubectl get endpoints kubernetes -n default -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null)
+              case "$HOST" in ""|*[0-9].[0-9]*.[0-9]*.[0-9]*) HOST="" ;; esac
+              if [ -n "$HOST" ] && [ -n "$IP" ]; then
+                # A DMS pod dir has a containers/hostagent subdir. Its /etc/hosts is a bind-mount
+                # from <poddir>/etc-hosts, so appending to that file shows up inside the DMS pod.
+                for pd in /host/var/lib/kubelet/pods/*/; do
+                  [ -d "$pd/containers/hostagent" ] || continue
+                  eh="$pd/etc-hosts"
+                  [ -f "$eh" ] || continue
+                  grep -q " $HOST\$" "$eh" 2>/dev/null || echo "$IP $HOST" >> "$eh"
+                done
+              fi
+              sleep 20
+            done
+        volumeMounts:
+        - {name: host, mountPath: /host}
+        resources: {requests: {cpu: 10m, memory: 64Mi}, limits: {cpu: 100m, memory: 256Mi}}
+      volumes:
+      - {name: host, hostPath: {path: /}}
