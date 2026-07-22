@@ -1,0 +1,100 @@
+# Durable fix for the last manual step in a fresh DPF deploy: the post-flash
+# DPU power-cycle.
+#
+# ROOT CAUSE: after the BFB flash the DPU's oob_net0 comes up with NO CARRIER
+# (the PHY isn't re-initialised by the warm reboot DPF does). The baked
+# dpf-oob-fixup can `ip link set oob_net0 up` (admin state) but cannot fix a
+# dead carrier -- only a power-cycle re-inits the PHY. Without a lease oob has
+# no IP, so the DPU can't reach the tenant API and sits at "DPU Cluster Config"
+# forever. The stock DPF ZT flow papers over this with a manual host
+# power-cycle; this CronJob does it automatically via the DPU BMC Redfish.
+#
+# It power-cycles a DPU ONLY when it is stuck: phase="DPU Cluster Config" AND
+# its oob IP does not ping (carrier still dead). It records the attempt in an
+# annotation and waits between tries so it never loops on a DPU that is simply
+# mid-boot.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpu-oob-carrier-repower
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpu-oob-carrier-repower
+rules:
+  - apiGroups: [provisioning.dpu.nvidia.com]
+    resources: [dpus, dpudevices]
+    verbs: [get, list, patch, update]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpu-oob-carrier-repower
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: dpu-oob-carrier-repower}
+subjects:
+  - kind: ServiceAccount
+    name: dpu-oob-carrier-repower
+    namespace: dpf-operator-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpu-oob-carrier-repower
+  namespace: dpf-operator-system
+spec:
+  schedule: "*/3 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: dpu-oob-carrier-repower
+          restartPolicy: Never
+          hostNetwork: true          # needs L2 to the DPU oob IPs + BMC subnet
+          containers:
+          - name: repower
+            image: bitnami/kubectl:latest
+            securityContext: {runAsUser: 0}
+            env:
+              - {name: BMC_USER, value: "root"}
+              - {name: BMC_PASS, value: "Welcome2spectr0!"}
+            command: ["/bin/sh","-c"]
+            args:
+              - |
+                set -eu
+                NOW=$(date +%s)
+                # each DPUdevice carries its BMC IP; the desired oob IP is on the DPU CR name/annotations.
+                # We map by the maas-dpu-network-setup secret which records dpuN_oob_ip.
+                DAK_OOB=$(kubectl -n dpf-operator-system get secret maas-api-credentials -o jsonpath='{.data.dpu2_oob_ip}' 2>/dev/null | base64 -d)
+                FN_OOB=$(kubectl -n dpf-operator-system get secret maas-api-credentials -o jsonpath='{.data.dpu1_oob_ip}' 2>/dev/null | base64 -d)
+                for row in "mt2439600dak:$DAK_OOB" "mt24326005fn:$FN_OOB"; do
+                  serial="${row%%:*}"; oob="${row##*:}"
+                  [ -n "$oob" ] || continue
+                  dpu=$(kubectl -n dpf-operator-system get dpus.provisioning.dpu.nvidia.com -o jsonpath="{range .items[*]}{.metadata.name}{'\n'}{end}" 2>/dev/null | grep "$serial" | head -1)
+                  [ -n "$dpu" ] || continue
+                  phase=$(kubectl -n dpf-operator-system get dpu "$dpu" -o jsonpath='{.status.phase}' 2>/dev/null)
+                  [ "$phase" = "DPU Cluster Config" ] || continue
+                  # only repower if oob is NOT reachable (carrier dead)
+                  if ping -c1 -W2 "$oob" >/dev/null 2>&1; then continue; fi
+                  # rate-limit: skip if we tried within the last 6 min
+                  last=$(kubectl -n dpf-operator-system get dpu "$dpu" -o jsonpath='{.metadata.annotations.custeng\.sc/last-repower}' 2>/dev/null || echo 0)
+                  [ -n "$last" ] || last=0
+                  if [ $((NOW - last)) -lt 360 ]; then echo "$dpu: repowered recently, skip"; continue; fi
+                  bmc=$(kubectl -n dpf-operator-system get dpudevice "$serial" -o jsonpath='{.spec.bmcIp}' 2>/dev/null)
+                  [ -n "$bmc" ] || continue
+                  echo "$dpu stuck (phase=$phase, oob $oob down) -> power-cycling via BMC $bmc"
+                  kubectl -n dpf-operator-system annotate dpu "$dpu" "custeng.sc/last-repower=$NOW" --overwrite >/dev/null 2>&1 || true
+                  curl -sk --max-time 15 -u "$BMC_USER:$BMC_PASS" -X POST -H 'Content-Type: application/json' \
+                    -d '{"ResetType":"ForceRestart"}' \
+                    "https://$bmc/redfish/v1/Systems/Bluefield/Actions/ComputerSystem.Reset" 2>&1 | head -c 120 || true
+                  echo " (reset sent)"
+                done
+            resources: {requests: {cpu: 10m, memory: 64Mi}, limits: {cpu: 100m, memory: 256Mi}}
