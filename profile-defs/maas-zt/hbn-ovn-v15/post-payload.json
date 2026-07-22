@@ -1,7 +1,7 @@
 {
   "metadata": {
-    "name": "DPF ZT HBN v21 (EVPN + multiport-eSwitch + dyn-PF + whereabouts + PodMTU1400 + oob-fixup)",
-    "description": "Complete profile-driven pod-VF EVPN offload: v20 + esw_multiport boot service (dpf-esw-multiport) so VXLAN ECMP-hashes across both 40G uplinks from first boot \u2014 no runtime patching. All fixes baked: EVPN L2VNI stretch, dynamic PF detection, whereabouts IPAM, PodMTU=1400, oob-fixup+esw-multiport systemd boot services in DPUFlavor configFiles.",
+    "name": "DPF ZT HBN v22 (EVPN + multiport + oob-fixup + MaaS-creds-baked)",
+    "description": "v21 + the MaaS API creds baked into MaasConsumerKey/TokenKey/TokenSecret defaults, so maas-dpu-network-setup can reserve the DPU oob DHCP leases (.20/.29) -> oob-fixup gets a lease -> DPUs join. Without these the reservation job fails and DPUs never join (v25 blocker). ",
     "labels": {
       "tier": "addon",
       "dpf-mode": "zero-trust",
@@ -231,7 +231,7 @@
         "name": "MaasConsumerKey",
         "displayName": "MaaS OAuth consumer key",
         "format": "string",
-        "defaultValue": "",
+        "defaultValue": "6o67TedEjgFG9FU9yl",
         "required": false,
         "immutable": false,
         "hidden": false,
@@ -242,7 +242,7 @@
         "name": "MaasTokenKey",
         "displayName": "MaaS OAuth token key",
         "format": "string",
-        "defaultValue": "",
+        "defaultValue": "G7MTeW2G6zV0lLCIEU",
         "required": false,
         "immutable": false,
         "hidden": false,
@@ -253,7 +253,7 @@
         "name": "MaasTokenSecret",
         "displayName": "MaaS OAuth token secret",
         "format": "string",
-        "defaultValue": "",
+        "defaultValue": "RSydxwjWw4IdCXlufJcz3oH4Tpk08ZW0",
         "required": false,
         "immutable": false,
         "hidden": false,
