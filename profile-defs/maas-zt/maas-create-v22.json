@@ -1,0 +1,73 @@
+{
+  "metadata": {
+    "name": "dpf-hbn-ovn-v22",
+    "labels": {}
+  },
+  "spec": {
+    "cloudAccountUid": "68701eb20a6295d37a7d87df",
+    "profiles": [
+      {
+        "uid": "6a6020e4ec8588c7c5b9eba6"
+      },
+      {
+        "uid": "6a60121078c73f29a481a1f3"
+      }
+    ],
+    "policies": {
+      "scanPolicy": null
+    },
+    "cloudConfig": {
+      "domain": "maas-custeng.sc",
+      "sshKeys": [],
+      "ntpServers": [],
+      "staticIp": false
+    },
+    "machinepoolconfig": [
+      {
+        "cloudConfig": {
+          "azs": [
+            "default"
+          ],
+          "instanceType": {
+            "minCPU": 4,
+            "minMemInMB": 8192
+          },
+          "resourcePool": "forde-dpf"
+        },
+        "poolConfig": {
+          "name": "cp-pool",
+          "size": 1,
+          "isControlPlane": true,
+          "labels": [
+            "master"
+          ],
+          "additionalLabels": {},
+          "taints": [],
+          "useControlPlaneAsWorker": false
+        }
+      },
+      {
+        "cloudConfig": {
+          "azs": [
+            "default"
+          ],
+          "instanceType": {
+            "minCPU": 32,
+            "minMemInMB": 131072
+          },
+          "resourcePool": "forde-dpf"
+        },
+        "poolConfig": {
+          "name": "worker-pool",
+          "size": 2,
+          "isControlPlane": false,
+          "labels": [
+            "worker"
+          ],
+          "additionalLabels": {},
+          "taints": []
+        }
+      }
+    ]
+  }
+}
