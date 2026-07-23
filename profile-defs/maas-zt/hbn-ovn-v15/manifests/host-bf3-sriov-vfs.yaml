@@ -71,12 +71,17 @@ spec:
                   echo "detected PF=$PF, set sriov_numvfs=$VFS_TO_CREATE"
                   sleep 3
                 fi
+                # Jumbo: the VF MTU cannot exceed the parent PF MTU, so raise the PF to
+                # 9000 EVERY loop (not just on VF creation), otherwise the NAD's
+                # "mtu":8900 never applies and net1 comes up at 1500.
+                [ "$(cat /sys/class/net/$PF/mtu 2>/dev/null)" = "9000" ] || ip link set "$PF" mtu 9000 2>/dev/null || true
                 # Bring every VF of THIS PF up (via virtfn links, name-agnostic) so
                 # sriov-device-plugin's netDeviceProvider (walks /sys/class/net,
                 # skips DOWN-only devs) enumerates them.
                 for vf in /sys/class/net/$PF/device/virtfn*; do
                   [ -e "$vf/net" ] || continue
                   for IF in $(ls "$vf/net" 2>/dev/null); do
+                    ip link set "$IF" mtu 9000 2>/dev/null || true
                     ip link set "$IF" up 2>/dev/null || true
                   done
                 done
