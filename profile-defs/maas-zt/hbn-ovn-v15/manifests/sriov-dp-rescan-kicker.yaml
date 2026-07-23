@@ -47,18 +47,31 @@ spec:
           - |
             set +e
             while true; do
-              # find PF0 (phys_port_name=p0) numvfs on this host
-              NUMVFS=0
+              # find PF0 (phys_port_name=p0) on this host, then count the VF netdevs
+              # that are actually UP -- that is what sriov-device-plugin can advertise.
+              PF=""; NUMVFS=0
               for d in /host/sys/class/net/*; do
                 [ "$(cat "$d/phys_port_name" 2>/dev/null)" = "p0" ] || continue
                 [ "$(cat "$d/device/sriov_totalvfs" 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null || continue
-                NUMVFS=$(cat "$d/device/sriov_numvfs" 2>/dev/null || echo 0); break
+                PF=$(basename "$d"); NUMVFS=$(cat "$d/device/sriov_numvfs" 2>/dev/null || echo 0); break
               done
+              UPVF=0
+              if [ -n "$PF" ]; then
+                for vf in /host/sys/class/net/$PF/device/virtfn*; do
+                  [ -e "$vf/net" ] || continue
+                  for IF in $(ls "$vf/net" 2>/dev/null); do
+                    [ "$(cat /host/sys/class/net/$IF/operstate 2>/dev/null)" = "up" ] && UPVF=$((UPVF+1))
+                  done
+                done
+              fi
               ALLOC=$(kubectl get node "$NODE" -o jsonpath='{.status.allocatable.nvidia\.com/bf3_p0_vfs}' 2>/dev/null); [ -n "$ALLOC" ] || ALLOC=0
-              if [ "$NUMVFS" -gt 0 ] 2>/dev/null && [ "$ALLOC" = "0" ]; then
+              # Re-scan when the plugin advertises FEWER than are actually up. Covers
+              # both the cold-start race (alloc=0) and the partial-materialize case
+              # (e.g. alloc=3 while 4 VFs are up after host-bf3-sriov-vfs re-materializes).
+              if [ "$UPVF" -gt 0 ] 2>/dev/null && [ "$ALLOC" -lt "$UPVF" ] 2>/dev/null; then
                 POD=$(kubectl -n kube-system get pod -l app=sriovdp --field-selector spec.nodeName="$NODE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
                 [ -z "$POD" ] && POD=$(kubectl -n kube-system get pod --field-selector spec.nodeName="$NODE" -o name 2>/dev/null | grep sriov-device-plugin | head -1 | cut -d/ -f2)
-                if [ -n "$POD" ]; then echo "VFs=$NUMVFS but bf3_p0_vfs alloc=0 -> re-scan: deleting $POD"; kubectl -n kube-system delete pod "$POD" >/dev/null 2>&1; sleep 45; fi
+                if [ -n "$POD" ]; then echo "bf3_p0_vfs alloc=$ALLOC < up_vfs=$UPVF (numvfs=$NUMVFS) -> re-scan: deleting $POD"; kubectl -n kube-system delete pod "$POD" >/dev/null 2>&1; sleep 45; fi
               fi
               sleep 30
             done
