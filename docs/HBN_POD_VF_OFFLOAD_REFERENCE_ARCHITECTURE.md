@@ -4,7 +4,7 @@
 **Scope:** End-to-end design of a DPF Zero-Trust (ZT) provisioned cluster running DOCA HBN (EVPN L2VNI) with **pod-VF hardware eSwitch offload**, delivered as Spectro Cloud Palette cluster profiles on MaaS-managed bare metal. Includes the target workload profile, the full durable-fix catalog, and a benchmarking section (single-pair, bandwidth aggregation across both 40 GbE uplinks, and multiport ECMP verification).
 **Platform versions:** DPF v25.10.1, DOCA HBN (BlueField-3, DOCA 2.x BSP), OVN-Kubernetes primary CNI, Spectro Cloud Palette (edge-native/MaaS), Kamaji tenant control planes.
 
-> **Diagram note.** Diagrams are provided as Mermaid fenced blocks (render on GitHub and in Mermaid-aware Markdown→PDF pipelines, e.g. `pandoc` with `mermaid-filter`, or `mmdc` pre-render) and, for the fabric, additionally as monospace ASCII that renders in any PDF converter.
+> **Diagram note.** Architecture diagrams and benchmark graphs are inlined as rendered PNGs (Mermaid sources kept alongside under `docs/images/*.mmd`); the fabric is additionally drawn as monospace ASCII. The document renders as-is on GitHub and converts to PDF with no diagramming tooling.
 
 ---
 
