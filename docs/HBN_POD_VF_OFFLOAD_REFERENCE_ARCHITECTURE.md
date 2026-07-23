@@ -1,7 +1,7 @@
 # Reference Architecture — DOCA HBN Pod-VF Hardware Offload on BlueField-3 via NVIDIA DPF and Spectro Cloud Palette
 
 **Audience:** NVIDIA DOCA / DPF engineering, Spectro Cloud field engineering, and platform architects deploying accelerated Kubernetes on BlueField DPUs.
-**Scope:** End-to-end design of a DPF Zero-Trust (ZT) provisioned cluster running DOCA HBN (EVPN L2VNI) with **pod-VF hardware eSwitch offload**, delivered as Spectro Cloud Palette cluster profiles on MaaS-managed bare metal. Includes the target workload profile, the full durable-fix catalog, and a benchmarking section (single-pair, aggregate, and multiport ECMP verification).
+**Scope:** End-to-end design of a DPF Zero-Trust (ZT) provisioned cluster running DOCA HBN (EVPN L2VNI) with **pod-VF hardware eSwitch offload**, delivered as Spectro Cloud Palette cluster profiles on MaaS-managed bare metal. Includes the target workload profile, the full durable-fix catalog, and a benchmarking section (single-pair, bandwidth aggregation across both 40 GbE uplinks, and multiport ECMP verification).
 **Platform versions:** DPF v25.10.1, DOCA HBN (BlueField-3, DOCA 2.x BSP), OVN-Kubernetes primary CNI, Spectro Cloud Palette (edge-native/MaaS), Kamaji tenant control planes.
 
 > **Diagram note.** Diagrams are provided as Mermaid fenced blocks (render on GitHub and in Mermaid-aware Markdown→PDF pipelines, e.g. `pandoc` with `mermaid-filter`, or `mmdc` pre-render) and, for the fabric, additionally as monospace ASCII that renders in any PDF converter.
@@ -30,26 +30,9 @@
 
 This architecture delivers a **customer-realistic accelerated networking pattern**: a workload pod keeps its ordinary OVN-Kubernetes `eth0` for cluster/service traffic, and additionally receives an **SR-IOV Virtual Function as a secondary interface (`net1`)** whose entire dataplane is **hardware eSwitch-offloaded** on the BlueField-3 DPU, switched and routed by **DOCA HBN** across an **EVPN/VXLAN L2VNI** overlay on a BGP/ECMP underlay. The DPU Arm cores are **not in the packet path** — the offload is the defining property, and is verified empirically (§11.4).
 
-```mermaid
-flowchart TB
-  subgraph HostCluster["Host K8s cluster (Palette / MaaS)"]
-    OP["DPF Operator + CRs"]
-    OVNK["OVN-Kubernetes (primary CNI)"]
-    MUL["Multus + SR-IOV device plugin"]
-  end
-  subgraph Tenant["Per-DPU tenant control plane"]
-    KAM["Kamaji TenantControlPlane"]
-  end
-  subgraph DPUs["BlueField-3 DPUs"]
-    HBN["DOCA HBN (FRR + NVUE + OVS/eSwitch)"]
-  end
-  OP --> KAM
-  OP --> HBN
-  OVNK -->|pod eth0| Pod["Workload pod"]
-  MUL -->|pod net1 = SR-IOV VF| Pod
-  Pod -->|net1 dataplane, HW offload| HBN
-  HBN -->|EVPN L2VNI over BGP/ECMP| Fabric["2×40G → Nexus leaf"]
-```
+![Figure 1 — System context: Palette/DPF provisioning, host CNI, and the DPU dataplane.](images/system-context.png)
+
+*Figure 1 — System context: Palette/DPF provisioning, host CNI, and the DPU dataplane.*
 
 Three layers compose the solution:
 
@@ -101,9 +84,9 @@ Pod-VF hardware offload is for **east-west-heavy, throughput- and/or tail-latenc
 | `net1` | SR-IOV VF, MTU 9000, IP from whereabouts `10.10.11.0/24` |
 | Host CPU cost of dataplane | ~0 (VF forwarded in HW; DPU Arm ~92% idle under load, §11.4) |
 | VFs available | 4 created by default per PF0; nvconfig `NUM_OF_VFS=46` headroom |
-| Per-DPU uplink capacity | 2 × 40 GbE = **80 Gbit/s** (with multiport ECMP, §8) |
+| Per-DPU uplink capacity | 2 × 40 GbE = **80 Gbit/s** aggregated via multiport ECMP (§8) |
 | Per-flow ceiling | ~33 Gbit/s (single TCP flow / single pod TCP stack) |
-| Fabric saturation (measured) | **77.72 Gbit/s** across 4 balanced pairs (§11.3) |
+| Bandwidth aggregation (measured) | **77.72 Gbit/s** ≈ 97% of 2×40 GbE, balanced across both workers (§11.3) |
 
 **Rule of thumb:** provision enough pods/flows to exceed the per-flow ceiling, and **balance senders and receivers across both workers**; a single busy sender can still exceed one uplink because multiport ECMP hashes its VXLAN across both (§11.3).
 
@@ -112,8 +95,8 @@ Pod-VF hardware offload is for **east-west-heavy, throughput- and/or tail-latenc
 | Benchmark (§11) | Real-world question it answers |
 |-----------------|-------------------------------|
 | Single-pair TCP (1/8/16 streams) | Per-flow / per-pod throughput SLA for one workload instance |
-| Balanced aggregate (4 pairs) | Multi-pod / multi-tenant **fabric capacity** and headroom |
-| Multiport PHY split | Can one busy pod/VTEP exceed a single 40G uplink? (link aggregation working?) |
+| Bandwidth aggregation (balanced pairs) | Multi-pod / multi-tenant **fabric capacity** — both 40G uplinks combined |
+| Multiport PHY split | Is bandwidth aggregation working? (one busy VTEP spread across both uplinks) |
 | UDP 64-byte PPS | Small-packet / control-plane / telco user-plane density |
 | netperf TCP_RR / sockperf tail | Latency-SLA workloads (messaging, market data, RPC) |
 | netperf TCP_CRR | Connection churn (short-lived RPC, serverless, web tiers) |
@@ -175,23 +158,9 @@ The Kamaji **tenant** control plane for the DPU cluster runs off-worker (on a VM
 
 DPF ZT keeps DPU credentials and the DPU-side Kubernetes out of the host cluster's trust domain.
 
-```mermaid
-sequenceDiagram
-    participant P as Palette
-    participant DO as DPF Operator
-    participant K as Kamaji (tenant CP)
-    participant BMC as DPU BMC (Redfish)
-    participant DPU as BlueField-3
-    P->>DO: apply infra + HBN cluster profiles
-    DO->>K: create TenantControlPlane (from DPUCluster)
-    DO->>DO: DPUDiscovery ⇒ DPU / DPUDevice CRs
-    DO->>BMC: BFB flash (Redfish ImageURI)
-    BMC->>DPU: write BFB, reboot
-    DPU->>DPU: oob_net0 up + MaaS DHCP lease
-    DPU->>K: kubeadm join (tenant cluster)
-    DO->>DPU: DPUDeployment "ovn-hbn" ⇒ doca-hbn, ovn DPUServices
-    DO->>DPU: sfc-controller wires representors (DPUServiceChain)
-```
+![Figure 2 — DPF Zero-Trust provisioning sequence.](images/provisioning-sequence.png)
+
+*Figure 2 — DPF Zero-Trust provisioning sequence.*
 
 ### 4.1 Critical dependencies and where they break
 
@@ -206,22 +175,9 @@ sequenceDiagram
 
 ### 5.1 Packet path
 
-```mermaid
-flowchart LR
-  subgraph Worker["Worker node (gpu-sm01)"]
-    Pod["Pod<br/>eth0 (OVN) + net1 (VF)"]
-    PF["Host PF0 eSwitch (switchdev)"]
-  end
-  subgraph DPU["BlueField-3 DPU — DOCA HBN"]
-    Rep["pf0vfN_if<br/>(swp, VLAN 11 access)"]
-    Br["br_default<br/>(VLAN-aware)"]
-    SVI["vlan11 SVI<br/>10.10.11.1 (anycast)"]
-    VX["vxlan48<br/>(L2VNI VTEP)"]
-    UP["p0_if / p1_if<br/>(ECMP /31 eBGP)"]
-  end
-  Pod -->|net1| PF -->|VF representor, hardware| Rep --> Br --> SVI --> VX --> UP -->|2×40G| Leaf["Nexus leaf"]
-  Pod -->|eth0| OVN["OVN-K (cluster / service traffic)"]
-```
+![Figure 3 — Pod-VF dataplane packet path (net1 hardware-offloaded through HBN).](images/dataplane-packet-path.png)
+
+*Figure 3 — Pod-VF dataplane packet path (net1 hardware-offloaded through HBN).*
 
 - The pod's `net1` is an SR-IOV **VF of the host-facing PF0**. In switchdev mode each host VF has a **representor on the DPU** named `pf0vfN_if`.
 - HBN places every `pf0vfN_if` as an **access port on VLAN 11**, which maps to the **L2VNI**. Traffic from the pod's VF is switched in the BF3 eSwitch and VXLAN-encapsulated **in hardware** — the Arm cores never see the data plane.
@@ -252,15 +208,9 @@ The pod requests `nvidia.com/bf3_p0_vfs: "1"` and annotates `k8s.v1.cni.cncf.io/
 
 ## 6. DOCA HBN EVPN design
 
-```mermaid
-flowchart TB
-  LEAF["Nexus leaf — AS 65001, lo 11.0.0.111<br/>(NOT EVPN-capable)"]
-  FN["DPU FN — AS 65010, lo 11.0.0.1"]
-  DAK["DPU DAK — AS 65020, lo 11.0.0.2"]
-  FN -- "eBGP /31 ×2 (underlay, ECMP)" --> LEAF
-  DAK -- "eBGP /31 ×2 (underlay, ECMP)" --> LEAF
-  FN <-- "l2vpn-evpn multihop<br/>(overlay, lo↔lo)" --> DAK
-```
+![Figure 4 — HBN EVPN control plane: eBGP /31 underlay + DPU-to-DPU l2vpn-evpn overlay.](images/evpn-control-plane.png)
+
+*Figure 4 — HBN EVPN control plane: eBGP /31 underlay + DPU-to-DPU l2vpn-evpn overlay.*
 
 ### 6.1 Underlay (BGP, routed /31 + ECMP)
 
@@ -304,17 +254,9 @@ DPU DAK:  neighbor 11.0.0.1 remote-as 65010   (l2vpn-evpn, multihop, update-sour
 
 The representor-to-HBN wiring is **declarative**, driven by DPF `sfc-controller` from two CR families in the host cluster.
 
-```mermaid
-flowchart LR
-  subgraph CRs["Host cluster CRs (dpf-operator-system)"]
-    SI["DPUServiceInterface ×N<br/>p0 / p1 / pf0hpf / pf0vf0..3"]
-    SC["DPUServiceChain: ovn-hbn"]
-  end
-  SFC["sfc-controller (on DPU)"]
-  HBN["doca-hbn pod<br/>label svc.dpu.nvidia.com/service=<br/>dpudeployment_ovn-hbn_doca-hbn"]
-  SI --> SC --> SFC -->|finds pods by verbose label| HBN
-  SFC -->|adds representor SFs to br_default, VLAN 11| HBN
-```
+![Figure 5 — SFC wiring: DPUServiceInterface → ServiceChain → sfc-controller → HBN.](images/sfc-wiring.png)
+
+*Figure 5 — SFC wiring: DPUServiceInterface → ServiceChain → sfc-controller → HBN.*
 
 ### 7.1 The serviceID label (authoritative, high-impact)
 
@@ -408,8 +350,8 @@ Every item below is baked into a profile so a fresh deploy is hands-off. This is
 
 - **Tools:** iperf3 (throughput/PPS), netperf (latency/conn-rate), sockperf (tail latency). **5 runs per benchmark**, reported as **mean ± population stdev**.
 - **Workload:** pods on worker nodes, each with `net1` = SR-IOV VF at MTU 9000, cross-node/cross-DPU over the EVPN L2VNI. Client pod uses the peer pod's `net1` IP in the flat `10.10.11.0/24`.
-- **Two regimes:** (a) **single pod-pair** — the per-flow/per-pod ceiling; (b) **aggregate (4 balanced pairs)** — **fabric saturation** + multiport ECMP.
-- **Environment:** the standalone, hands-off deploy set (**infra v14 + HBN v28**); every result comes from profile-rendered configuration with **no live patching**.
+- **Two regimes:** (a) **single pod-pair** — the per-flow/per-pod ceiling; (b) **bandwidth aggregation** — multiple balanced pod-pairs across both workers, exercising both 40 GbE uplinks per DPU via multiport ECMP.
+- **Environment:** the authoritative standalone, hands-off deploy set (**infra v14 + HBN v28**); every result comes from profile-rendered configuration with **no live patching**. All figures below are from this single reference deployment.
 
 ### 11.2 Single-pair results (5 runs, mean ± stdev)
 
@@ -426,61 +368,55 @@ Every item below is baked into a profile so a fresh deploy is hands-off. This is
 | 9 | Sustained connections/sec | netperf TCP_CRR | 3,145 ± 179 conn/s |
 | 10 | Tail latency | sockperf | P50 **30.11** / P99 **49.33** / P99.9 **73.78** µs |
 
+![Figure 7 — Single-pair TCP throughput (v28 standalone).](images/bench-throughput.png)
+
+*Figure 7 — Single-pair pod-to-pod TCP throughput (net1 VF, MTU 9000, cross-DPU; 5 runs ± σ).*
+
+![Figure 8 — Latency (v28 standalone).](images/bench-latency.png)
+
+*Figure 8 — Request/response (netperf) and tail (sockperf) latency.*
+
 **Interpretation.** Single-pair TCP tops ~33–35 Gbit/s — the ceiling is one VXLAN flow's entropy landing on one uplink plus a single pod's TCP stack, **not** the fabric. The UDP throughput rows (max, 1400 B) are single unpaced flows, pod-CPU-bound, and inherently noisy — not a fabric measure.
 
-### 11.3 Aggregate — fabric saturation and multiport ECMP
+### 11.3 Bandwidth aggregation — both 40 GbE uplinks combined
 
-Single-pair does not load the fabric. To saturate it you need **multiple flows across both workers**. **Topology is decisive:**
+Each DPU has two 40 GbE uplinks to the leaf. **Multiport eSwitch (§8) aggregates their bandwidth**: a single VTEP's self-originated VXLAN is ECMP-hashed across both uplinks, so the fabric delivers ~2×40 = **80 Gbit/s** rather than a single 40 GbE path. Aggregate load is generated with balanced pod-pairs — 2 clients + 2 servers per worker, cross-paired (Figure 6) — so both DPUs egress on both uplinks simultaneously.
 
-```mermaid
-flowchart LR
-  subgraph sm01["gpu-sm01 / FN"]
-    bc0["bc0 (client)"]
-    bc1["bc1 (client)"]
-    bs2["bs2 (server)"]
-    bs3["bs3 (server)"]
-  end
-  subgraph sm02["gpu-sm02 / DAK"]
-    bs0["bs0 (server)"]
-    bs1["bs1 (server)"]
-    bc2["bc2 (client)"]
-    bc3["bc3 (client)"]
-  end
-  bc0 --> bs0
-  bc1 --> bs1
-  bc2 --> bs2
-  bc3 --> bs3
-```
+![Figure 6 — Balanced benchmark topology (2 clients + 2 servers per node).](images/benchmark-topology.png)
 
-| Topology | Aggregate | Retransmits |
-|----------|-----------|-------------|
-| All 4 clients on one node (16 streams) | 58.83 Gbit/s | ~400 k total (one-sided incast) |
-| All 4 clients on one node (zerocopy) | 62.33 Gbit/s | ~400 k total |
-| **Balanced: 2 clients + 2 servers per node** (16 streams) | **77.72 Gbit/s** | **~28 total** |
+*Figure 6 — Balanced benchmark topology (2 clients + 2 servers per node, cross-paired).*
 
-Putting all clients on one node drives the whole load through one host's egress and one DPU, leaving the second worker's uplinks idle as pure RX → massive incast drops. **Balancing** (each node runs 2 clients + 2 servers, cross-paired so both DPUs egress simultaneously) lifted throughput **+25%** and eliminated retransmits. Direction split was symmetric: **sm01→sm02 39.63**, **sm02→sm01 38.08** Gbit/s.
+![Figure 9 — Bandwidth aggregation vs a single 40 GbE uplink.](images/bench-aggregation.png)
 
-**77.72 Gbit/s ≈ 97% of the 2×40 GbE** available to a DPU pair. The residual gap is host-side (iperf3 CPU + each worker's PF sharing TX and RX), **not** the HBN fabric.
+*Figure 9 — Measured aggregate bandwidth vs a single 40 GbE uplink; ceiling is 2×40 = 80 Gbit/s.*
 
-#### Multiport ECMP — direct hardware proof
+**Measured aggregate: 77.72 Gbit/s** — ≈ **97% of the 2×40 GbE (80 Gbit/s)** available to the DPU pair, with retransmits ~0. The direction split is symmetric (sm01→sm02 **39.63** / sm02→sm01 **38.08** Gbit/s). The residual gap to 80 is host-side (iperf3 CPU and each worker's PF sharing TX and RX), **not** the HBN fabric.
+
+> **Methodology note.** Bandwidth aggregation requires senders and receivers **balanced across both workers**. Concentrating all senders on one node collapses the measurement onto a single DPU's egress (incast) and does not exercise the aggregated fabric.
+
+#### Multiport ECMP — direct hardware proof of aggregation
 
 During a **single-DPU (FN) egress-only** burst, the **hardware PHY tx counters** of the two physical uplinks were sampled (`/sys/class/net/pN/statistics/tx_bytes` on the DPU host — these count HW-offloaded traffic; the software netdev/ethtool counters do **not**, which is itself the offload signature):
 
+![Figure 10 — Per-uplink egress split (aggregation) and DPU Arm idle (offload).](images/bench-multiport.png)
+
+*Figure 10 — Left: single-DPU egress split across both 40 GbE uplinks (bandwidth aggregation). Right: DPU Arm CPU during throughput (offload).*
+
 ```
-p0 (0000:03:00.0)  PHY-TX delta:  35.11 GB   (47%)
-p1 (0000:03:00.1)  PHY-TX delta:  39.79 GB   (53%)
-  total 74.9 GB in 12 s  ≈  49.9 Gbit/s from ONE DPU
+p0 (0000:03:00.0)  PHY-TX:  35.11 GB  (47%)  ≈ 23.4 Gbit/s
+p1 (0000:03:00.1)  PHY-TX:  39.79 GB  (53%)  ≈ 26.5 Gbit/s
+  Σ  74.9 GB in 12 s  ≈  49.9 Gbit/s from ONE DPU
 ```
 
-~50 Gbit/s out of a single DPU is **physically impossible on one 40 GbE uplink**, and the split is a near-even 47/53. **Multiport ECMP is active — and it came up from the baked boot service on a fresh deploy, no live patching.**
+~50 Gbit/s out of a single DPU is **physically impossible on one 40 GbE uplink**, and the split is a near-even 47/53. **Multiport ECMP aggregates both uplinks — and it comes up from the baked boot service on a fresh deploy, with no live patching.**
 
 ### 11.4 Offload verification
 
-During sustained 16-stream throughput the **DPU Arm cores measured 92.6% idle** (16 cores, ~7.4% busy; `/proc/stat` delta on the DPU). Combined with the near-zero software byte counters (§11.3), this confirms the BF3 eSwitch forwards the VF dataplane **in hardware** — the pod stays on the worker and the Arm is not in the packet path. **This is the economic case for offload: line-rate-class throughput at ~0 host/DPU CPU.**
+During sustained 16-stream throughput the **DPU Arm cores measured 92.6% idle** (16 cores, ~7.4% busy; `/proc/stat` delta on the DPU — Figure 10, right). Combined with the near-zero software byte counters (§11.3), this confirms the BF3 eSwitch forwards the VF dataplane **in hardware** — the pod stays on the worker and the Arm is not in the packet path. **This is the economic case for offload: line-rate-class throughput at ~0 host/DPU CPU.**
 
-### 11.5 Jumbo MTU dependency (throughput)
+### 11.5 Jumbo MTU (throughput requirement)
 
-An early run showed ~28 Gbit/s at 8 streams. Root cause: **PF0 was at MTU 1500**, and a VF cannot exceed its parent PF, so the NAD's `mtu` never applied and `net1` came up 1500. A prior "MTU doesn't matter" test was invalid (VF advertised 8900 but PF 1500 → fragmentation). Raising PF0 **and** the VFs to 9000 (baked, every loop) brings `net1` up jumbo end-to-end → **34.9 Gbit/s** 8-stream. Fabric MTU has VXLAN headroom (`vlan11`/`vxlan48` = 9216; inner 9000 + 50 B = 9050).
+Jumbo end-to-end is a **hard requirement**. A VF cannot exceed its parent PF's MTU, so PF0 **and** the VFs must be at 9000 for `net1` to come up jumbo; if PF0 is left at 1500 the NAD's `mtu` silently fails, `net1` falls back to 1500, and every VXLAN frame fragments — cutting 8-stream throughput to ~28 Gbit/s. The `host-bf3-sriov-vfs` DaemonSet raises PF0 and every VF to 9000 on every loop (baked), so `net1` comes up 9000 with no manual step and the 8-stream result reaches **34.9 Gbit/s**. Fabric MTU has VXLAN headroom (`vlan11`/`vxlan48` = 9216; inner 9000 + 50 B = 9050).
 
 ### 11.6 Reproducing
 
@@ -579,4 +515,4 @@ cat /sys/class/net/p0/statistics/tx_bytes /sys/class/net/p1/statistics/tx_bytes
 
 ---
 
-*Reference deployment: cluster `dpf-hbn-ovn-v28`, profiles infra v14 + HBN v28. Benchmark artifacts: `results/pod-vf-evpn-hbn-v28/` (single-pair suite, aggregate, multiport, DPU-idle) and `results/pod-vf-evpn-hbn-v27/`.*
+*Reference deployment: cluster `dpf-hbn-ovn-v28`, profiles infra v14 + HBN v28. Benchmark artifacts: `results/pod-vf-evpn-hbn-v28/` (single-pair suite, bandwidth aggregation, multiport, DPU-idle).*

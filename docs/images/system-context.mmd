@@ -1,0 +1,18 @@
+flowchart TB
+  subgraph HostCluster["Host K8s cluster (Palette / MaaS)"]
+    OP["DPF Operator + CRs"]
+    OVNK["OVN-Kubernetes (primary CNI)"]
+    MUL["Multus + SR-IOV device plugin"]
+  end
+  subgraph Tenant["Per-DPU tenant control plane"]
+    KAM["Kamaji TenantControlPlane"]
+  end
+  subgraph DPUs["BlueField-3 DPUs"]
+    HBN["DOCA HBN (FRR + NVUE + OVS/eSwitch)"]
+  end
+  OP --> KAM
+  OP --> HBN
+  OVNK -->|pod eth0| Pod["Workload pod"]
+  MUL -->|pod net1 = SR-IOV VF| Pod
+  Pod -->|net1 dataplane, HW offload| HBN
+  HBN -->|EVPN L2VNI over BGP/ECMP| Fabric["2×40G → Nexus leaf"]

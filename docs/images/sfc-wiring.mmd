@@ -1,0 +1,9 @@
+flowchart LR
+  subgraph CRs["Host cluster CRs (dpf-operator-system)"]
+    SI["DPUServiceInterface ×N<br/>p0 / p1 / pf0hpf / pf0vf0..3"]
+    SC["DPUServiceChain: ovn-hbn"]
+  end
+  SFC["sfc-controller (on DPU)"]
+  HBN["doca-hbn pod<br/>label svc.dpu.nvidia.com/service=<br/>dpudeployment_ovn-hbn_doca-hbn"]
+  SI --> SC --> SFC -->|finds pods by verbose label| HBN
+  SFC -->|adds representor SFs to br_default, VLAN 11| HBN

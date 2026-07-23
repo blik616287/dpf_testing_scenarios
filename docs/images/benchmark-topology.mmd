@@ -1,0 +1,17 @@
+flowchart LR
+  subgraph sm01["gpu-sm01 / FN"]
+    bc0["bc0 (client)"]
+    bc1["bc1 (client)"]
+    bs2["bs2 (server)"]
+    bs3["bs3 (server)"]
+  end
+  subgraph sm02["gpu-sm02 / DAK"]
+    bs0["bs0 (server)"]
+    bs1["bs1 (server)"]
+    bc2["bc2 (client)"]
+    bc3["bc3 (client)"]
+  end
+  bc0 --> bs0
+  bc1 --> bs1
+  bc2 --> bs2
+  bc3 --> bs3

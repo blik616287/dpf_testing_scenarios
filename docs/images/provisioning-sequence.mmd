@@ -1,0 +1,15 @@
+sequenceDiagram
+    participant P as Palette
+    participant DO as DPF Operator
+    participant K as Kamaji (tenant CP)
+    participant BMC as DPU BMC (Redfish)
+    participant DPU as BlueField-3
+    P->>DO: apply infra + HBN cluster profiles
+    DO->>K: create TenantControlPlane (from DPUCluster)
+    DO->>DO: DPUDiscovery ⇒ DPU / DPUDevice CRs
+    DO->>BMC: BFB flash (Redfish ImageURI)
+    BMC->>DPU: write BFB, reboot
+    DPU->>DPU: oob_net0 up + MaaS DHCP lease
+    DPU->>K: kubeadm join (tenant cluster)
+    DO->>DPU: DPUDeployment "ovn-hbn" ⇒ doca-hbn, ovn DPUServices
+    DO->>DPU: sfc-controller wires representors (DPUServiceChain)
