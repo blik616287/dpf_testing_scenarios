@@ -1,0 +1,1 @@
+{"dpu_arm_idle_pct": 92, "dpu_arm_busy_pct": 8, "dpu_cores": 16, "measured_during": "tcp throughput on the pod-VF EVPN fabric"}

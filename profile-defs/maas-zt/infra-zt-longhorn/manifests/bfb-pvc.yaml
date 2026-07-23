@@ -1,0 +1,19 @@
+# DPF requires a pre-created PVC to hold the BFB image for DPU flashing.
+# The DPFOperatorConfig references bfbPVCName: bfb-pvc, but nothing in the DPF
+# Helm chart creates the PVC itself -- it must exist or bfb-registry and
+# dpf-provisioning-controller-manager stay Pending ("persistentvolumeclaim
+# bfb-pvc not found") and DPU provisioning never starts. RWX because the two
+# consumers are separate Deployments (may land on different nodes); Longhorn
+# provides RWX via an on-demand share-manager.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bfb-pvc
+  namespace: dpf-operator-system
+spec:
+  accessModes: [ReadWriteMany]
+  volumeMode: Filesystem
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi

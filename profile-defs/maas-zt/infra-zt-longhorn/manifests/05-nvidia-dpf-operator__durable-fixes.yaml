@@ -1,0 +1,299 @@
+---
+# ============================================================================
+# CRD: IPAMClaim (k8s.cni.cncf.io/v1alpha1)
+# Needed only if enablePersistentIPs is flipped on later. Included as a safety
+# net so a config change doesn't crash the CNI controller.
+# ============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: ipamclaims.k8s.cni.cncf.io
+  annotations:
+    spectrocloud.com/install-priority: "5"
+spec:
+  group: k8s.cni.cncf.io
+  names:
+    kind: IPAMClaim
+    listKind: IPAMClaimList
+    plural: ipamclaims
+    singular: ipamclaim
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
+    subresources:
+      status: {}
+---
+# ============================================================================
+# CRD: MultiNetworkPolicy (k8s.cni.cncf.io/v1beta1)
+# Needed only if enableMultiNetwork is flipped on later. Same safety-net idea.
+# ============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: multi-networkpolicies.k8s.cni.cncf.io
+  annotations:
+    spectrocloud.com/install-priority: "5"
+spec:
+  group: k8s.cni.cncf.io
+  names:
+    kind: MultiNetworkPolicy
+    listKind: MultiNetworkPolicyList
+    plural: multi-networkpolicies
+    shortNames: [multi-netpol]
+    singular: multi-networkpolicy
+  scope: Namespaced
+  versions:
+  - name: v1beta1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
+---
+# ============================================================================
+# DNS HARDENER — writes explicit /etc/resolv.conf on every node
+# Reason: the Palette golden image ships systemd-resolved at 127.0.0.53 which
+# returns "server misbehaving" once OVN-K takes over host networking. All
+# image pulls die (kubelet can't resolve ghcr.io / docker.io). This DS
+# unlinks /etc/resolv.conf (which is a systemd-managed symlink) and writes
+# a plain file with public resolvers, then re-applies every 60s in case
+# something rewrites it.
+# ============================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-dns-hardener
+  namespace: kube-system
+  annotations:
+    spectrocloud.com/install-priority: "10"
+spec:
+  selector: {matchLabels: {app: node-dns-hardener}}
+  template:
+    metadata: {labels: {app: node-dns-hardener}}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      tolerations: [{operator: Exists}]
+      priorityClassName: system-node-critical
+      containers:
+      - name: dns
+        image: registry.k8s.io/pause:3.10
+        command: [/pause]
+      initContainers:
+      - name: setup
+        image: alpine:3
+        restartPolicy: Always
+        securityContext: {privileged: true, runAsUser: 0}
+        command: [sh, -c]
+        args:
+        - |
+          set -eu
+          while true; do
+            # Compose fresh resolv.conf with public DNS + search domain
+            cat > /tmp/rc.new <<RC
+          nameserver 172.16.30.1
+          nameserver 8.8.8.8
+          nameserver 1.1.1.1
+          options timeout:2 attempts:3
+          RC
+            # /etc/resolv.conf is a symlink managed by systemd-resolved. Break it
+            # and replace with a plain file so kubelet's containers get real DNS.
+            if [ -L /host/etc/resolv.conf ] || ! cmp -s /host/etc/resolv.conf /tmp/rc.new; then
+              rm -f /host/etc/resolv.conf
+              cp /tmp/rc.new /host/etc/resolv.conf
+              chmod 0644 /host/etc/resolv.conf
+              echo "[$(date -Iseconds)] resolv.conf refreshed on $(hostname)"
+            fi
+            sleep 60
+          done
+        volumeMounts: [{name: host, mountPath: /host}]
+      volumes: [{name: host, hostPath: {path: /}}]
+---
+# ============================================================================
+# NODE ZONE-NAME LABELER — labels each node with k8s.ovn.org/zone-name=<hostname>
+# Reason: in `enableInterconnect: true` single-node-zone mode, ovnkube-controller
+# reads `k8s.ovn.org/zone-name` from the Node object. If missing → falls back to
+# "global" → NBDB zone (== hostname) != controller zone → controller crashes with
+# "OVN NBDB zone X does not match the configured zone 'global'".
+# CronJob keeps every node labeled every minute.
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: node-zone-labeler, namespace: kube-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: node-zone-labeler}
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get","list","patch","update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: node-zone-labeler}
+subjects: [{kind: ServiceAccount, name: node-zone-labeler, namespace: kube-system}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: node-zone-labeler}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: node-zone-labeler
+  namespace: kube-system
+  annotations:
+    spectrocloud.com/install-priority: "20"
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      ttlSecondsAfterFinished: 120
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: node-zone-labeler
+          containers:
+          - name: label
+            image: bitnami/kubectl:latest
+            command: [sh, -c]
+            args:
+            - |
+              set -eu
+              for n in $(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                cur=$(kubectl get node "$n" -o jsonpath='{.metadata.labels.k8s\.ovn\.org/zone-name}' 2>/dev/null || echo "")
+                if [ "$cur" != "$n" ]; then
+                  kubectl label node "$n" k8s.ovn.org/zone-name="$n" --overwrite 2>&1 | head -1
+                fi
+              done
+---
+# ============================================================================
+# OVN-K gateway bridge-uplink Job (existing v1)
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ovnk-gateway-bridge-uplink-fix
+  namespace: kube-system
+  annotations:
+    spectrocloud.com/install-priority: "60"
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 8
+  template:
+    spec:
+      restartPolicy: OnFailure
+      hostNetwork: true
+      hostPID: true
+      nodeSelector: {node-role.kubernetes.io/control-plane: ""}
+      tolerations: [{operator: Exists}]
+      containers:
+      - name: fix
+        image: alpine:3
+        securityContext: {privileged: true, runAsUser: 0}
+        command: [sh, -c]
+        args:
+        - |
+          set -eu
+          apk add --no-cache openvswitch-cli iproute2 kubectl >/dev/null 2>&1 || true
+          for i in $(seq 1 60); do ovs-vsctl br-exists brbr-dpu 2>/dev/null && break; sleep 5; done
+          UPLINK="{{.spectro.var.controlPlaneInterface}}"
+          if ! ovs-vsctl list-ports brbr-dpu 2>/dev/null | grep -qw "$UPLINK"; then
+            ovs-vsctl --if-exists del-port brbr-dpu br-dpu 2>/dev/null || true
+            ip link set "$UPLINK" nomaster 2>/dev/null || true
+            ip link set "$UPLINK" up
+            ovs-vsctl --may-exist add-port brbr-dpu "$UPLINK" 2>/dev/null || true
+          fi
+          ovs-vsctl set Bridge brbr-dpu "external-ids:bridge-uplink=$UPLINK" 2>/dev/null || true
+          ip link delete br-dpu 2>/dev/null || true
+          kubectl -n ovn-kubernetes delete pod -l app=ovnkube-node --field-selector spec.nodeName=$(hostname) 2>/dev/null || true
+          echo done
+---
+# ============================================================================
+# DPU install-interface race fixer (existing v1)
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: dpu-install-interface-fixer, namespace: dpf-operator-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: dpu-install-interface-fixer}
+rules:
+- apiGroups: ["provisioning.dpu.nvidia.com"]
+  resources: ["dpunodes","dpunodes/status"]
+  verbs: ["get","list","patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: dpu-install-interface-fixer}
+subjects: [{kind: ServiceAccount, name: dpu-install-interface-fixer, namespace: dpf-operator-system}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: dpu-install-interface-fixer}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dpf-dpu-install-interface-fixer
+  namespace: dpf-operator-system
+  annotations: {spectrocloud.com/install-priority: "70"}
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      ttlSecondsAfterFinished: 120
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: dpu-install-interface-fixer
+          containers:
+          - name: fix
+            image: bitnami/kubectl:latest
+            command: [sh, -c]
+            args:
+            - |
+              set -eu
+              for n in $(kubectl -n dpf-operator-system get dpunode -o jsonpath='{range .items[?(@.status.dpuInstallInterface=="hostAgent")]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+                kubectl -n dpf-operator-system patch dpunode "$n" --subresource=status --type=merge -p '{"status":{"dpuInstallInterface":"redfish"}}' 2>&1 || true
+              done
+---
+# ============================================================================
+# dpu-bmc-rshim-forcer suspender (existing v1)
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dpf-rshim-forcer-suspender
+  namespace: dpf-operator-system
+  annotations: {spectrocloud.com/install-priority: "70"}
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: dpu-install-interface-fixer
+      containers:
+      - name: suspend
+        image: bitnami/kubectl:latest
+        command: [sh, -c]
+        args:
+        - |
+          set -eu
+          for i in $(seq 1 60); do
+            kubectl -n dpf-operator-system get cronjob dpu-bmc-rshim-forcer >/dev/null 2>&1 && break
+            sleep 10
+          done
+          kubectl -n dpf-operator-system patch cronjob dpu-bmc-rshim-forcer -p '{"spec":{"suspend":true}}' 2>&1 || true

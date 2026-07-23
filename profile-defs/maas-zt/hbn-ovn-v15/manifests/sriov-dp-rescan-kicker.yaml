@@ -1,0 +1,67 @@
+# Durable fix for the sriov-device-plugin scan race.
+#
+# sriov-device-plugin scans PF0's VFs ONCE at startup and never re-scans. On a
+# fresh deploy it usually starts before host-bf3-sriov-vfs has created the VFs
+# (the BF3 host PF appears late post-flash), so it registers 0 devices for
+# nvidia.com/bf3_p0_vfs and pods can never get a net1 VF. This DaemonSet watches
+# each node: if PF0 (phys_port_name=p0) has numvfs>0 but the node advertises 0
+# bf3_p0_vfs, it deletes the local sriov-device-plugin pod once so it re-scans
+# and picks up the VFs. Self-healing, idempotent (only acts when mismatched).
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sriov-dp-rescan-kicker, namespace: kube-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: sriov-dp-rescan-kicker}
+rules:
+  - {apiGroups: [""], resources: [pods], verbs: [get, list, delete]}
+  - {apiGroups: [""], resources: [nodes], verbs: [get, list]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: sriov-dp-rescan-kicker}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sriov-dp-rescan-kicker}
+subjects: [{kind: ServiceAccount, name: sriov-dp-rescan-kicker, namespace: kube-system}]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: sriov-dp-rescan-kicker, namespace: kube-system}
+spec:
+  selector: {matchLabels: {app: sriov-dp-rescan-kicker}}
+  template:
+    metadata: {labels: {app: sriov-dp-rescan-kicker}}
+    spec:
+      serviceAccountName: sriov-dp-rescan-kicker
+      hostPID: true
+      priorityClassName: system-node-critical
+      tolerations: [{operator: Exists}]
+      containers:
+      - name: kicker
+        image: bitnami/kubectl:latest
+        securityContext: {privileged: true, runAsUser: 0}
+        env:
+          - {name: NODE, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+        command: ["/bin/sh","-c"]
+        args:
+          - |
+            set +e
+            while true; do
+              # find PF0 (phys_port_name=p0) numvfs on this host
+              NUMVFS=0
+              for d in /host/sys/class/net/*; do
+                [ "$(cat "$d/phys_port_name" 2>/dev/null)" = "p0" ] || continue
+                [ "$(cat "$d/device/sriov_totalvfs" 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null || continue
+                NUMVFS=$(cat "$d/device/sriov_numvfs" 2>/dev/null || echo 0); break
+              done
+              ALLOC=$(kubectl get node "$NODE" -o jsonpath='{.status.allocatable.nvidia\.com/bf3_p0_vfs}' 2>/dev/null); [ -n "$ALLOC" ] || ALLOC=0
+              if [ "$NUMVFS" -gt 0 ] 2>/dev/null && [ "$ALLOC" = "0" ]; then
+                POD=$(kubectl -n kube-system get pod -l app=sriovdp --field-selector spec.nodeName="$NODE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+                [ -z "$POD" ] && POD=$(kubectl -n kube-system get pod --field-selector spec.nodeName="$NODE" -o name 2>/dev/null | grep sriov-device-plugin | head -1 | cut -d/ -f2)
+                if [ -n "$POD" ]; then echo "VFs=$NUMVFS but bf3_p0_vfs alloc=0 -> re-scan: deleting $POD"; kubectl -n kube-system delete pod "$POD" >/dev/null 2>&1; sleep 45; fi
+              fi
+              sleep 30
+            done
+        volumeMounts: [{name: sys, mountPath: /host/sys, readOnly: true}]
+        resources: {requests: {cpu: 10m, memory: 64Mi}, limits: {cpu: 100m, memory: 256Mi}}
+      volumes: [{name: sys, hostPath: {path: /sys}}]
