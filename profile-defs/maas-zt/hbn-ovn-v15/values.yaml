@@ -234,16 +234,32 @@ charts:
             raw: |
               #!/bin/bash
               set +e
-              # Wait for the two uplink PFs to appear, then enable multiport eswitch.
+              # Detect the two BF3 uplink PFs DYNAMICALLY by phys_port_name (p0/p1)
+              # instead of hardcoding PCI (0000:03:00.0/.1 is correct on this BF3 but
+              # is not portable across DPU models/slots). Same detection pattern as the
+              # host-bf3-sriov-vfs VF script. Falls back to the known BF3 uplink PCIs
+              # if the netdevs haven't materialised in time.
+              find_pci() { # $1 = p0|p1 ; echoes the owning PCI function
+                for d in /sys/class/net/*; do
+                  [ "$(cat "$d/phys_port_name" 2>/dev/null)" = "$1" ] || continue
+                  pci=$(basename "$(readlink -f "$d/device" 2>/dev/null)" 2>/dev/null)
+                  case "$pci" in 0000:*) echo "$pci"; return 0;; esac
+                done
+                return 1
+              }
+              P0=""; P1=""
               for i in $(seq 1 60); do
-                [ -e /sys/bus/pci/devices/0000:03:00.0/net ] && [ -e /sys/bus/pci/devices/0000:03:00.1/net ] && break
+                P0=$(find_pci p0); P1=$(find_pci p1)
+                [ -n "$P0" ] && [ -n "$P1" ] && break
                 sleep 2
               done
-              for pf in 0000:03:00.0 0000:03:00.1; do
+              [ -n "$P0" ] || P0=0000:03:00.0
+              [ -n "$P1" ] || P1=0000:03:00.1
+              for pf in "$P0" "$P1"; do
                 devlink dev eswitch set pci/$pf mode switchdev 2>/dev/null
                 devlink dev param set pci/$pf name esw_multiport value true cmode runtime 2>/dev/null
               done
-              logger "dpf-esw-multiport: lag=$(cat /sys/kernel/debug/mlx5/0000:03:00.0/lag/state 2>/dev/null)"
+              logger "dpf-esw-multiport: P0=$P0 P1=$P1 lag=$(cat /sys/kernel/debug/mlx5/$P0/lag/state 2>/dev/null)"
               exit 0
           - path: /etc/systemd/system/dpf-esw-multiport.service
             operation: override
