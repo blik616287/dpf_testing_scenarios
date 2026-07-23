@@ -1,0 +1,7 @@
+flowchart TB
+  LEAF["Nexus leaf — AS 65001, lo 11.0.0.111<br/>(NOT EVPN-capable)"]
+  FN["DPU FN — AS 65010, lo 11.0.0.1"]
+  DAK["DPU DAK — AS 65020, lo 11.0.0.2"]
+  FN -- "eBGP /31 ×2 (underlay, ECMP)" --> LEAF
+  DAK -- "eBGP /31 ×2 (underlay, ECMP)" --> LEAF
+  FN <-- "l2vpn-evpn multihop<br/>(overlay, lo↔lo)" --> DAK

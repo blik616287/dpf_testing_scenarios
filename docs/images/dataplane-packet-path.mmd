@@ -1,0 +1,14 @@
+flowchart LR
+  subgraph Worker["Worker node (gpu-sm01)"]
+    Pod["Pod<br/>eth0 (OVN) + net1 (VF)"]
+    PF["Host PF0 eSwitch (switchdev)"]
+  end
+  subgraph DPU["BlueField-3 DPU — DOCA HBN"]
+    Rep["pf0vfN_if<br/>(swp, VLAN 11 access)"]
+    Br["br_default<br/>(VLAN-aware)"]
+    SVI["vlan11 SVI<br/>10.10.11.1 (anycast)"]
+    VX["vxlan48<br/>(L2VNI VTEP)"]
+    UP["p0_if / p1_if<br/>(ECMP /31 eBGP)"]
+  end
+  Pod -->|net1| PF -->|VF representor, hardware| Rep --> Br --> SVI --> VX --> UP -->|2×40G| Leaf["Nexus leaf"]
+  Pod -->|eth0| OVN["OVN-K (cluster / service traffic)"]
