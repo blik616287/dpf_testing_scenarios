@@ -1,0 +1,5 @@
+sockperf: ---> percentile 99.999 =  275.251
+sockperf: ---> percentile 99.990 =  112.428
+sockperf: ---> percentile 99.900 =   70.067
+sockperf: ---> percentile 99.000 =   47.350
+sockperf: ---> percentile 50.000 =   30.211
