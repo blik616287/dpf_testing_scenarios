@@ -1,0 +1,9 @@
+Subject: Fabric change request — revert gpu1/gpu2 p0 uplinks (Eth1/23, Eth1/25) to L2 VLAN 497
+
+Hi [name],
+
+We need to run the DPF passthrough and OVN-accelerated benchmarks again, and both need the two DPU "p0" uplinks back on a flat L2 segment — i.e. revert Eth1/23 (gpu1 p0) and Eth1/25 (gpu2 p0) from routed /31 back to "switchport access vlan 497" (dpf-dummy-fabric, 172.16.97.0/24, MTU 9216). This is exactly the reverse of the p0→/31 change you actioned on 2026-05-20; the p1 ports (Eth1/24, Eth1/26) stay routed /31 for HBN and don't change.
+
+The one thing we'd ask you to double-check is that the two ports genuinely bridge (broadcast/MAC crossing) — access-VLAN membership alone bit us last time. Full details, the exact NX-OS config, validation steps, and a rollback are in the attached doc; there's also an optional SVI+BGP option (§8) if you'd rather keep all our test modes working at once instead of us asking you to flip the ports each campaign.
+
+Thanks!
