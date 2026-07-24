@@ -418,7 +418,36 @@ During sustained 16-stream throughput the **DPU Arm cores measured 92.6% idle** 
 
 Jumbo end-to-end is a **hard requirement**. A VF cannot exceed its parent PF's MTU, so PF0 **and** the VFs must be at 9000 for `net1` to come up jumbo; if PF0 is left at 1500 the NAD's `mtu` silently fails, `net1` falls back to 1500, and every VXLAN frame fragments — cutting 8-stream throughput to ~28 Gbit/s. The `host-bf3-sriov-vfs` DaemonSet raises PF0 and every VF to 9000 on every loop (baked), so `net1` comes up 9000 with no manual step and the 8-stream result reaches **34.9 Gbit/s**. Fabric MTU has VXLAN headroom (`vlan11`/`vxlan48` = 9216; inner 9000 + 50 B = 9050).
 
-### 11.6 Reproducing
+### 11.6 Uplink failover (fabric resilience)
+
+The point of routing each DPU's two 40 GbE uplinks as ECMP `/31` eBGP with a multiport eSwitch is
+**resilience**, not just aggregate bandwidth. Failover is exercised by administratively downing one
+uplink (`p0_if`) inside the DOCA HBN pod mid-flow, then restoring it. The failure is confirmed real
+via the DPU PHY counters — during the down window p0 tx froze (0 GB) and p1 carried 100%.
+
+> **Method caveat.** Downing the *host-side* `p0` netdev does **not** fail the uplink — the eSwitch
+> keeps forwarding on it (throughput stays > 40 Gbit/s during the "failover", which is impossible on
+> one uplink). The valid method is downing the **HBN-side `p0_if`** SWP interface.
+
+![Figure 11 — HBN uplink failover: 0 packet loss, graceful degradation and recovery.](images/bench-failover.png)
+
+*Figure 11 — Aggregate FN egress across an uplink failure (p0 down → up). Traffic degrades to the
+surviving uplink's capacity, then recovers full aggregation — with zero packet loss.*
+
+| Scenario | Dual uplink | During failover (single uplink) | Recovery | Packet loss |
+|----------|-------------|--------------------------------|----------|-------------|
+| **Load < one uplink** (single pair, ~32 G) | 32.5 Gbit/s | **31.8 Gbit/s (98%)** — no impact | 32.3 Gbit/s | none |
+| **Load > one uplink** (2-pair, ~50 G) | 49.9 Gbit/s | **38.5 Gbit/s (77%, capped at ~40 G)** | 50.3 Gbit/s in ~2–3 s | **0 % (0 / 400 pings)** |
+
+**Findings.** Convergence is **sub-100 ms** (no ICMP lost at 10 Hz across *both* the failure and the
+recovery) and handled **in hardware** by the multiport eSwitch + ECMP — the BGP sessions do not even
+reset for a member-link failure. Below one uplink's capacity, failover is throughput-transparent;
+above it, the fabric **degrades gracefully** to the surviving uplink rather than dropping traffic, and
+**restores full aggregation within ~2–3 s** of the uplink returning (BGP re-establishes both leaf
+sessions to 129 prefixes). This is the resilience contract for the design: **an uplink loss costs
+headroom, never connectivity.**
+
+### 11.7 Reproducing
 
 ```bash
 # net1 jumbo check (should be 9000 on every pod, from the profile)
