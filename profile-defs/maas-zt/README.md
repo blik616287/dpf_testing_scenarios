@@ -87,3 +87,4 @@ substitute per deploy.
 
 ## Published profile revisions
 - HBN v29 (`6a62a9b2045821571a9aa1b1`) — VF re-materialize self-heal + dynamic multiport eSwitch PCI (published 2026-07-23). Deploy with infra v14 `6a615582e61b15d543fb38aa`; payload `maas-create-v30.json`.
+- HBN v30 (`6a62c4a290e424a8b5c22124`) — CORRECTED: VF self-heal only (re)creates when `sriov_numvfs != target` (retry-until-materialized), so it never destroys a VF handed to a pod. **Use this, not HBN v29** (`6a62a9b2045821571a9aa1b1`, whose netdev-count self-heal destroyed pod net1). Payload `maas-create-v30.json`. Verified on the v30 cluster: net1 persists, cross-DPU 0% loss.

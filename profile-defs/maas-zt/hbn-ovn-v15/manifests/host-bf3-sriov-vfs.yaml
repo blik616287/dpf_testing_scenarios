@@ -60,10 +60,10 @@ spec:
               done
               return 1
             }
-            # Count VF netdevs actually present under the PF. BF3 sometimes leaves
-            # sriov_numvfs=N but fails to materialize one or more virtfn netdevs
-            # (the "VF re-materialize" flake) -> the device plugin then advertises
-            # fewer than N and pods can't all get a net1.
+            # Count VF netdevs present under the PF *in this (host) netns*. NOTE this
+            # cannot distinguish "netdev never materialized" from "netdev was moved
+            # into a pod netns" -- both show as absent here. So it is ONLY used inside
+            # create_vfs (below), during initial creation, before any pod exists.
             count_vf_netdevs() {
               n=0
               for vf in /sys/class/net/$1/device/virtfn*; do
@@ -72,31 +72,39 @@ spec:
               done
               echo "$n"
             }
-            REMAT=0
+            # (Re)create VFS_TO_CREATE VFs and RETRY the create until all their netdevs
+            # materialize -- BF3 sometimes leaves sriov_numvfs=N but produces fewer
+            # netdevs. Called ONLY when numvfs != target, i.e. at genuine (re)creation
+            # time. We must never re-create merely because a netdev looks absent later:
+            # a VF handed to a pod moves into the pod netns and vanishes from the host
+            # view, and re-creating would destroy that pod's net1 (regression fixed here).
+            create_vfs() {
+              pf="$1"
+              for attempt in 1 2 3 4 5 6; do
+                echo 0 > "/sys/class/net/$pf/device/sriov_numvfs" 2>/dev/null || true
+                sleep 2
+                echo "$VFS_TO_CREATE" > "/sys/class/net/$pf/device/sriov_numvfs" 2>/dev/null || true
+                sleep 4
+                n=$(count_vf_netdevs "$pf")
+                if [ "$n" -ge "$VFS_TO_CREATE" ] 2>/dev/null; then
+                  echo "PF=$pf: created $n/$VFS_TO_CREATE VF netdevs (attempt $attempt)"; return 0
+                fi
+                echo "PF=$pf: only $n/$VFS_TO_CREATE VF netdevs materialized (attempt $attempt); retrying"
+              done
+              echo "PF=$pf: proceeding with $(count_vf_netdevs "$pf")/$VFS_TO_CREATE VF netdevs after 6 attempts"
+            }
             while true; do
               PF=$(find_pf || true)
               if [ -n "${PF:-}" ] && [ -e "/sys/class/net/$PF/device/sriov_numvfs" ]; then
                 CUR=$(cat "/sys/class/net/$PF/device/sriov_numvfs")
-                NVF=$(count_vf_netdevs "$PF")
-                # (a) wrong numvfs -> (re)create. (b) numvfs correct but a VF netdev
-                # failed to materialize -> force a re-materialize (numvfs 0->N), BOUNDED
-                # so we never thrash VFs a running pod may already be bound to; the bound
-                # resets once all VF netdevs are present. This self-heals the case that
-                # the plain "CUR != VFS_TO_CREATE" check missed (numvfs already == N).
+                # Only (re)create when numvfs is not yet the target. Moving a VF into a
+                # pod netns does NOT change numvfs, so this never fires for in-use VFs
+                # -> we never destroy a pod's VF. create_vfs's internal retry is what
+                # self-heals the boot-time "netdev failed to materialize" flake, at the
+                # one safe moment (creation, before pods).
                 if [ "$CUR" != "$VFS_TO_CREATE" ]; then
-                  echo 0 > "/sys/class/net/$PF/device/sriov_numvfs" 2>/dev/null || true
-                  sleep 2
-                  echo "$VFS_TO_CREATE" > "/sys/class/net/$PF/device/sriov_numvfs" || true
-                  echo "PF=$PF: set sriov_numvfs=$VFS_TO_CREATE (was $CUR)"
-                  REMAT=0; sleep 3
-                elif [ "$NVF" -lt "$VFS_TO_CREATE" ] && [ "$REMAT" -lt 6 ]; then
-                  echo "PF=$PF: only $NVF/$VFS_TO_CREATE VF netdevs present -> re-materialize (try $((REMAT+1)))"
-                  echo 0 > "/sys/class/net/$PF/device/sriov_numvfs" 2>/dev/null || true
-                  sleep 2
-                  echo "$VFS_TO_CREATE" > "/sys/class/net/$PF/device/sriov_numvfs" || true
-                  REMAT=$((REMAT+1)); sleep 3
-                elif [ "$NVF" -ge "$VFS_TO_CREATE" ]; then
-                  REMAT=0
+                  echo "PF=$PF: sriov_numvfs=$CUR != $VFS_TO_CREATE -> creating VFs"
+                  create_vfs "$PF"
                 fi
                 # Jumbo: the VF MTU cannot exceed the parent PF MTU, so raise the PF to
                 # 9000 EVERY loop (not just on VF creation), otherwise the NAD's
